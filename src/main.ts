@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, shell } from "electron";
+import { app, BrowserWindow, Menu, nativeImage, shell, Tray } from "electron";
 import type { ChildProcess } from "node:child_process";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -28,6 +28,7 @@ const WINDOW_DRAG_REGION_CSS = `
 `;
 
 let mainWindow: BrowserWindow | undefined;
+let tray: Tray | undefined;
 let dshProcess: ChildProcess | undefined;
 let dshUrl: string | undefined;
 let isQuitting = false;
@@ -147,6 +148,46 @@ function configureWindowDragRegion(window: BrowserWindow): void {
   });
 }
 
+function showMainWindow(): void {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) {
+    if (!app.isReady()) {
+      return;
+    }
+
+    void createMainWindow().then(async () => {
+      if (dshUrl && mainWindow) {
+        await mainWindow.loadURL(dshUrl);
+      }
+    });
+    return;
+  }
+
+  if (window.isMinimized()) {
+    window.restore();
+  }
+  window.show();
+  window.focus();
+}
+
+function quitApplication(): void {
+  isQuitting = true;
+  app.quit();
+}
+
+function createTray(): void {
+  const icon = nativeImage.createFromPath(APP_ICON_PATH);
+  tray = new Tray(icon);
+  tray.setToolTip(APP_NAME);
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: "打开", click: showMainWindow },
+      { label: "关闭", click: quitApplication }
+    ])
+  );
+  tray.on("click", showMainWindow);
+}
+
 async function createMainWindow(): Promise<void> {
   const window = new BrowserWindow({
     width: 1320,
@@ -177,6 +218,12 @@ async function createMainWindow(): Promise<void> {
     event.preventDefault();
     window.setTitle(APP_NAME);
   });
+  window.on("close", (event) => {
+    if (!isQuitting) {
+      event.preventDefault();
+      window.hide();
+    }
+  });
   window.once("ready-to-show", () => window.show());
   window.on("closed", () => {
     if (mainWindow === window) {
@@ -188,6 +235,7 @@ async function createMainWindow(): Promise<void> {
 }
 
 async function startApplication(): Promise<void> {
+  createTray();
   await createMainWindow();
   await updateLoadingStatus(`正在启动 ${APP_NAME}…`);
 
@@ -248,28 +296,25 @@ async function startApplication(): Promise<void> {
 Menu.setApplicationMenu(null);
 app.setName(APP_NAME);
 
-void app.whenReady().then(startApplication).catch((error: unknown) => {
-  console.error(error);
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (hasSingleInstanceLock) {
+  app.on("second-instance", showMainWindow);
+  void app.whenReady().then(startApplication).catch((error: unknown) => {
+    console.error(error);
+    app.quit();
+  });
+} else {
   app.quit();
-});
+}
 
 app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    void createMainWindow().then(async () => {
-      if (dshUrl && mainWindow) {
-        await mainWindow.loadURL(dshUrl);
-      }
-    });
-  }
+  showMainWindow();
 });
 
 app.on("before-quit", () => {
   isQuitting = true;
+  tray?.destroy();
+  tray = undefined;
   stopDshServer();
-});
-
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
-  }
 });
