@@ -1,0 +1,32 @@
+appId: com.harnessdesktop.app
+productName: Harness Desktop
+asar: true
+npmRebuild: false
+
+directories:
+  output: release
+
+files:
+  - dist/**/*
+  - src/loading.html
+  - package.json
+
+# dsh loads plugins dynamically and includes native runtime modules. Keeping
+# production dependencies unpacked avoids executable and ASAR path issues.
+asarUnpack:
+  - node_modules/**/*
+
+win:
+  executableName: Harness Desktop
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Harness Desktop
+  artifactName: Harness-Desktop-Setup-${version}.${ext}

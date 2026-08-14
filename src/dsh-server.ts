@@ -26,7 +26,15 @@ interface WaitForHttpOptions {
 
 export function resolveDshCliPath(): string {
   const packageJsonPath = require.resolve("@deepseek-ai/dsh/package.json");
-  return path.join(path.dirname(packageJsonPath), "lib", "bin.js");
+  return resolveAsarUnpackedPath(
+    path.join(path.dirname(packageJsonPath), "lib", "bin.js")
+  );
+}
+
+export function resolveAsarUnpackedPath(filePath: string): string {
+  const asarSegment = `${path.sep}app.asar${path.sep}`;
+  const unpackedSegment = `${path.sep}app.asar.unpacked${path.sep}`;
+  return filePath.replace(asarSegment, unpackedSegment);
 }
 
 export function buildDshArguments({

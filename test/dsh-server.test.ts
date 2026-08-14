@@ -3,13 +3,34 @@ import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import http from "node:http";
 import net from "node:net";
+import path from "node:path";
 import test from "node:test";
 import {
   buildDshArguments,
   getAvailablePort,
+  resolveAsarUnpackedPath,
   waitForDshStartup,
   waitForHttp
 } from "../src/dsh-server.js";
+
+test("dsh uses the physical unpacked path in packaged applications", () => {
+  const packedPath = [
+    "C:",
+    "Harness Desktop",
+    "resources",
+    "app.asar",
+    "node_modules",
+    "@deepseek-ai",
+    "dsh",
+    "lib",
+    "bin.js"
+  ].join(path.sep);
+
+  assert.equal(
+    resolveAsarUnpackedPath(packedPath),
+    packedPath.replace("app.asar", "app.asar.unpacked")
+  );
+});
 
 test("dsh starts Electron's Node runtime with internal modules exposed", () => {
   assert.deepEqual(
