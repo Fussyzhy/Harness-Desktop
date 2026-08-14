@@ -45,7 +45,7 @@ npm start
 
 ## 构建 Windows 安装包
 
-首次构建先安装依赖，然后运行：
+首次构建先安装依赖，并将应用图标放到 `build/icon.png`，然后运行：
 
 ```powershell
 yarn package:win
@@ -89,6 +89,7 @@ src/main.ts          Electron 主进程与窗口生命周期
 src/dsh-server.ts    dsh 进程启动、端口选择与就绪检测
 src/loading.html     本地服务启动和错误状态页
 test/                dsh 服务模块测试
+build/icon.png       应用、安装器和快捷方式图标
 dist/                TypeScript 编译输出（不提交版本控制）
 electron-builder.yml Windows 安装包配置
 release/             打包输出（不提交版本控制）

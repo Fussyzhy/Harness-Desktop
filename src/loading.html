@@ -35,16 +35,11 @@
       }
 
       .mark {
-        width: 44px;
-        height: 44px;
+        width: 64px;
+        height: 64px;
         margin: 0 auto 20px;
-        display: grid;
-        place-items: center;
-        border-radius: 8px;
-        background: #15171a;
-        color: white;
-        font-size: 18px;
-        font-weight: 700;
+        display: block;
+        object-fit: contain;
       }
 
       h1 {
@@ -115,7 +110,7 @@
   </head>
   <body>
     <main>
-      <div class="mark" aria-hidden="true">HD</div>
+      <img class="mark" src="../build/icon.png" alt="" />
       <h1>Harness Desktop</h1>
       <p id="status">正在准备本地服务…</p>
       <div class="progress" id="progress" aria-hidden="true"></div>

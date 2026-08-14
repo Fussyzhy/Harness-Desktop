@@ -9,6 +9,7 @@ directories:
 files:
   - dist/**/*
   - src/loading.html
+  - build/icon.png
   - package.json
 
 # dsh loads plugins dynamically and includes native runtime modules. Keeping
@@ -18,6 +19,7 @@ asarUnpack:
 
 win:
   executableName: Harness Desktop
+  icon: build/icon.png
   target:
     - target: nsis
       arch:

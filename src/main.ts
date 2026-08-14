@@ -11,6 +11,7 @@ import {
 const DSH_HOST = "127.0.0.1";
 const APP_NAME = "Harness Desktop";
 const MAX_LOG_LINES = 80;
+const APP_ICON_PATH = path.join(app.getAppPath(), "build", "icon.png");
 const LOADING_PAGE_PATH = path.join(app.getAppPath(), "src", "loading.html");
 const LOADING_PAGE_URL = pathToFileURL(LOADING_PAGE_PATH).href;
 const WINDOW_DRAG_REGION_CSS = `
@@ -153,8 +154,9 @@ async function createMainWindow(): Promise<void> {
     minWidth: 900,
     minHeight: 640,
     backgroundColor: "#15171a",
+    icon: APP_ICON_PATH,
     show: false,
-    title: "",
+    title: APP_NAME,
     titleBarStyle: "hidden",
     titleBarOverlay: {
       color: "#15171a",
@@ -173,7 +175,7 @@ async function createMainWindow(): Promise<void> {
   configureWindowDragRegion(window);
   window.on("page-title-updated", (event) => {
     event.preventDefault();
-    window.setTitle("");
+    window.setTitle(APP_NAME);
   });
   window.once("ready-to-show", () => window.show());
   window.on("closed", () => {
