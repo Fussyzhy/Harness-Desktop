@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import http from "node:http";
 import net from "node:net";
@@ -32,14 +33,18 @@ test("dsh starts Electron's Node runtime with internal modules exposed", () => {
 test("getAvailablePort returns a bindable local port", async (t) => {
   const port = await getAvailablePort();
   const server = net.createServer();
-  t.after(() => server.close());
+  t.after(() => {
+    server.close();
+  });
 
-  await new Promise((resolve, reject) => {
+  await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, "127.0.0.1", resolve);
   });
 
-  assert.equal(server.address().port, port);
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  assert.equal(address.port, port);
 });
 
 test("waitForHttp resolves when a local server is ready", async (t) => {
@@ -48,10 +53,15 @@ test("waitForHttp resolves when a local server is ready", async (t) => {
     response.end("ok");
   });
 
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => server.close());
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  t.after(() => {
+    server.close();
+  });
 
   const address = server.address();
+  assert.ok(address && typeof address !== "string");
   await waitForHttp(`http://127.0.0.1:${address.port}`, {
     timeoutMs: 1_000,
     intervalMs: 20
@@ -74,11 +84,15 @@ test("waitForDshStartup rejects as soon as the child exits", async () => {
   setTimeout(() => child.emit("exit", 1, null), 10);
 
   await assert.rejects(
-    waitForDshStartup(child, "http://127.0.0.1:1", {
-      timeoutMs: 1_000,
-      intervalMs: 20,
-      requestTimeoutMs: 20
-    }),
+    waitForDshStartup(
+      child as unknown as ChildProcess,
+      "http://127.0.0.1:1",
+      {
+        timeoutMs: 1_000,
+        intervalMs: 20,
+        requestTimeoutMs: 20
+      }
+    ),
     /exited before startup/
   );
 });

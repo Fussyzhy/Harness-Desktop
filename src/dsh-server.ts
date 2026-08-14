@@ -1,16 +1,39 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import net from "node:net";
 import path from "node:path";
 
 const require = createRequire(import.meta.url);
 
-export function resolveDshCliPath() {
+interface DshArgumentsOptions {
+  cliPath: string;
+  host: string;
+  port: number;
+}
+
+interface StartDshServerOptions {
+  electronPath: string;
+  cwd: string;
+  host: string;
+  port: number;
+}
+
+interface WaitForHttpOptions {
+  timeoutMs?: number;
+  intervalMs?: number;
+  requestTimeoutMs?: number;
+}
+
+export function resolveDshCliPath(): string {
   const packageJsonPath = require.resolve("@deepseek-ai/dsh/package.json");
   return path.join(path.dirname(packageJsonPath), "lib", "bin.js");
 }
 
-export function buildDshArguments({ cliPath, host, port }) {
+export function buildDshArguments({
+  cliPath,
+  host,
+  port
+}: DshArgumentsOptions): string[] {
   return [
     "--expose-internals",
     cliPath,
@@ -22,11 +45,11 @@ export function buildDshArguments({ cliPath, host, port }) {
   ];
 }
 
-export async function getAvailablePort(host = "127.0.0.1") {
+export async function getAvailablePort(host = "127.0.0.1"): Promise<number> {
   const server = net.createServer();
 
   try {
-    await new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(0, host, resolve);
     });
@@ -39,38 +62,45 @@ export async function getAvailablePort(host = "127.0.0.1") {
     return address.port;
   } finally {
     if (server.listening) {
-      await new Promise((resolve, reject) => {
+      await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
       });
     }
   }
 }
 
-export function startDshServer({ electronPath, cwd, host, port }) {
+export function startDshServer({
+  electronPath,
+  cwd,
+  host,
+  port
+}: StartDshServerOptions): ChildProcess {
   const cliPath = resolveDshCliPath();
   const args = buildDshArguments({ cliPath, host, port });
-  const child = spawn(
-    electronPath,
-    args,
-    {
-      cwd,
-      env: {
-        ...process.env,
-        ELECTRON_RUN_AS_NODE: "1",
-        NO_COLOR: "1"
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true
-    }
-  );
 
-  return child;
+  return spawn(electronPath, args, {
+    cwd,
+    env: {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: "1",
+      NO_COLOR: "1"
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true
+  });
 }
 
-export async function waitForDshStartup(child, url, options) {
-  let exitHandler;
-  let errorHandler;
-  const stopped = new Promise((_, reject) => {
+export async function waitForDshStartup(
+  child: ChildProcess,
+  url: string,
+  options?: WaitForHttpOptions
+): Promise<void> {
+  let exitHandler:
+    | ((code: number | null, signal: NodeJS.Signals | null) => void)
+    | undefined;
+  let errorHandler: ((error: Error) => void) | undefined;
+
+  const stopped = new Promise<never>((_resolve, reject) => {
     exitHandler = (code, signal) => {
       reject(
         new Error(
@@ -86,17 +116,25 @@ export async function waitForDshStartup(child, url, options) {
   try {
     await Promise.race([waitForHttp(url, options), stopped]);
   } finally {
-    child.off("exit", exitHandler);
-    child.off("error", errorHandler);
+    if (exitHandler) {
+      child.off("exit", exitHandler);
+    }
+    if (errorHandler) {
+      child.off("error", errorHandler);
+    }
   }
 }
 
 export async function waitForHttp(
-  url,
-  { timeoutMs = 90_000, intervalMs = 250, requestTimeoutMs = 1_000 } = {}
-) {
+  url: string,
+  {
+    timeoutMs = 90_000,
+    intervalMs = 250,
+    requestTimeoutMs = 1_000
+  }: WaitForHttpOptions = {}
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  let lastError;
+  let lastError: unknown;
 
   while (Date.now() < deadline) {
     try {

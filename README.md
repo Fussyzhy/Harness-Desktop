@@ -27,9 +27,12 @@ profile 所需的 peer 包，因此 Yarn Classic 不需要依赖 npm 的自动 p
 桌面壳会在 `127.0.0.1` 上自动选择空闲端口，避免与已经运行的 dsh 实例冲突。
 首次进入后，在 Web UI 中配置模型并选择工作区。
 
+Electron 主进程与测试均使用 TypeScript。`yarn dev` 和 `npm start` 会在启动前
+自动将 `src/*.ts` 编译到忽略版本控制的 `dist/` 目录。
+
 ## 检查
 
 ```powershell
-npm run check
-npm test
+yarn run check
+yarn test
 ```
