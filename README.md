@@ -7,10 +7,22 @@
 
 需要 Node.js 22 或更高版本。
 
+使用 Yarn Classic：
+
+```powershell
+yarn install
+yarn dev
+```
+
+也可以使用 npm：
+
 ```powershell
 npm install
 npm start
 ```
+
+dsh 的 `rc.6` 插件包大量使用 peer dependencies。项目在顶层显式固定了 Web
+profile 所需的 peer 包，因此 Yarn Classic 不需要依赖 npm 的自动 peer 安装行为。
 
 桌面壳会在 `127.0.0.1` 上自动选择空闲端口，避免与已经运行的 dsh 实例冲突。
 首次进入后，在 Web UI 中配置模型并选择工作区。

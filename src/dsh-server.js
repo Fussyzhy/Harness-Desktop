@@ -10,6 +10,18 @@ export function resolveDshCliPath() {
   return path.join(path.dirname(packageJsonPath), "lib", "bin.js");
 }
 
+export function buildDshArguments({ cliPath, host, port }) {
+  return [
+    "--expose-internals",
+    cliPath,
+    "web",
+    "--host",
+    host,
+    "--port",
+    String(port)
+  ];
+}
+
 export async function getAvailablePort(host = "127.0.0.1") {
   const server = net.createServer();
 
@@ -36,9 +48,10 @@ export async function getAvailablePort(host = "127.0.0.1") {
 
 export function startDshServer({ electronPath, cwd, host, port }) {
   const cliPath = resolveDshCliPath();
+  const args = buildDshArguments({ cliPath, host, port });
   const child = spawn(
     electronPath,
-    [cliPath, "web", "--host", host, "--port", String(port)],
+    args,
     {
       cwd,
       env: {

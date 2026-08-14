@@ -4,10 +4,30 @@ import http from "node:http";
 import net from "node:net";
 import test from "node:test";
 import {
+  buildDshArguments,
   getAvailablePort,
   waitForDshStartup,
   waitForHttp
 } from "../src/dsh-server.js";
+
+test("dsh starts Electron's Node runtime with internal modules exposed", () => {
+  assert.deepEqual(
+    buildDshArguments({
+      cliPath: "C:\\app\\dsh\\lib\\bin.js",
+      host: "127.0.0.1",
+      port: 12345
+    }),
+    [
+      "--expose-internals",
+      "C:\\app\\dsh\\lib\\bin.js",
+      "web",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "12345"
+    ]
+  );
+});
 
 test("getAvailablePort returns a bindable local port", async (t) => {
   const port = await getAvailablePort();
