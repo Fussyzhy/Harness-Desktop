@@ -9,6 +9,7 @@ import {
 } from "./dsh-server.js";
 
 const DSH_HOST = "127.0.0.1";
+const APP_NAME = "Harness Desktop";
 const MAX_LOG_LINES = 80;
 const LOADING_PAGE_PATH = path.join(app.getAppPath(), "src", "loading.html");
 const LOADING_PAGE_URL = pathToFileURL(LOADING_PAGE_PATH).href;
@@ -29,7 +30,7 @@ let mainWindow: BrowserWindow | undefined;
 let dshProcess: ChildProcess | undefined;
 let dshUrl: string | undefined;
 let isQuitting = false;
-let hasLoadedHarness = false;
+let hasLoadedDsh = false;
 const recentLogs: string[] = [];
 
 function appendLog(source: string, chunk: Buffer): void {
@@ -96,7 +97,7 @@ function stopDshServer(): void {
   dshProcess = undefined;
 }
 
-function isHarnessUrl(url: string): boolean {
+function isDshUrl(url: string): boolean {
   if (!dshUrl) {
     return false;
   }
@@ -121,7 +122,7 @@ function openExternalUrl(url: string): void {
 
 function configureNavigation(window: BrowserWindow): void {
   window.webContents.setWindowOpenHandler(({ url }) => {
-    if (isHarnessUrl(url)) {
+    if (isDshUrl(url)) {
       return { action: "allow" };
     }
 
@@ -130,7 +131,7 @@ function configureNavigation(window: BrowserWindow): void {
   });
 
   window.webContents.on("will-navigate", (event, url) => {
-    if (!isHarnessUrl(url) && url !== LOADING_PAGE_URL) {
+    if (!isDshUrl(url) && url !== LOADING_PAGE_URL) {
       event.preventDefault();
       openExternalUrl(url);
     }
@@ -186,7 +187,7 @@ async function createMainWindow(): Promise<void> {
 
 async function startApplication(): Promise<void> {
   await createMainWindow();
-  await updateLoadingStatus("正在启动 DeepSeek Harness…");
+  await updateLoadingStatus(`正在启动 ${APP_NAME}…`);
 
   const workingDirectory = app.isPackaged
     ? app.getPath("documents")
@@ -208,7 +209,7 @@ async function startApplication(): Promise<void> {
     );
     dshProcess.on("error", (error) => {
       appendLog("process", Buffer.from(error.message));
-      void showProcessError("无法启动 DeepSeek Harness", error);
+      void showProcessError(`无法启动 ${APP_NAME}`, error);
     });
     dshProcess.on("exit", (code, signal) => {
       appendLog(
@@ -219,13 +220,11 @@ async function startApplication(): Promise<void> {
       );
 
       if (!isQuitting) {
-        const message = hasLoadedHarness
+        const message = hasLoadedDsh
           ? `dsh process exited (code ${code ?? "unknown"}).`
           : `dsh process exited before startup (code ${code ?? "unknown"}).`;
         void showProcessError(
-          hasLoadedHarness
-            ? "DeepSeek Harness 已停止"
-            : "DeepSeek Harness 启动失败",
+          hasLoadedDsh ? `${APP_NAME} 已停止` : `${APP_NAME} 启动失败`,
           new Error(message)
         );
       }
@@ -237,14 +236,15 @@ async function startApplication(): Promise<void> {
       return;
     }
     await window.loadURL(dshUrl);
-    hasLoadedHarness = true;
+    hasLoadedDsh = true;
   } catch (error) {
     stopDshServer();
-    await showProcessError("DeepSeek Harness 启动失败", error);
+    await showProcessError(`${APP_NAME} 启动失败`, error);
   }
 }
 
 Menu.setApplicationMenu(null);
+app.setName(APP_NAME);
 
 void app.whenReady().then(startApplication).catch((error: unknown) => {
   console.error(error);

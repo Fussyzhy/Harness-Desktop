@@ -1,11 +1,27 @@
-# DeepSeek Harness Desktop
+# Harness Desktop
 
-一个最小 Electron 桌面壳。应用启动时会运行项目中固定版本的
-`@deepseek-ai/dsh web`，等待本地服务就绪，然后加载其 Web UI。
+Harness Desktop 是一个基于 TypeScript 和 Electron 的
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 桌面客户端。
+应用启动后会在本机运行项目中固定版本的 `@deepseek-ai/dsh web`，等待服务就绪，
+再将 Web UI 直接加载到桌面窗口中。
+
+项目目前处于基础版本阶段，主要目标是提供可直接开发运行的桌面体验，暂未配置安装包构建与发布流程。
+
+## 当前功能
+
+- 随桌面应用自动启动和关闭本地 dsh 服务
+- 自动选择 `127.0.0.1` 上的空闲端口，避免与已有实例冲突
+- 在 Electron 窗口中加载完整的 DeepSeek Harness Web UI
+- 隐藏原生标题和图标，保留窗口控制按钮及顶部拖拽区域
+- 将应用外部链接交给系统默认浏览器打开
+- 在启动失败或服务意外退出时显示相关日志
+
+## 环境要求
+
+- Node.js 22 或更高版本
+- Yarn Classic，或 npm
 
 ## 开发运行
-
-需要 Node.js 22 或更高版本。
 
 使用 Yarn Classic：
 
@@ -14,25 +30,38 @@ yarn install
 yarn dev
 ```
 
-也可以使用 npm：
+使用 npm：
 
 ```powershell
 npm install
 npm start
 ```
 
-dsh 的 `rc.6` 插件包大量使用 peer dependencies。项目在顶层显式固定了 Web
-profile 所需的 peer 包，因此 Yarn Classic 不需要依赖 npm 的自动 peer 安装行为。
+首次进入应用后，需要在 DeepSeek Harness Web UI 中配置模型并选择工作区。
 
-桌面壳会在 `127.0.0.1` 上自动选择空闲端口，避免与已经运行的 dsh 实例冲突。
-首次进入后，在 Web UI 中配置模型并选择工作区。
-
-Electron 主进程与测试均使用 TypeScript。`yarn dev` 和 `npm start` 会在启动前
-自动将 `src/*.ts` 编译到忽略版本控制的 `dist/` 目录。
-
-## 检查
+## 项目检查
 
 ```powershell
 yarn run check
 yarn test
+```
+
+`check` 会检查主进程和测试代码的 TypeScript 类型，`test` 会运行 dsh 服务启动相关测试。
+
+## 实现说明
+
+- Electron 主进程和服务管理代码均使用 TypeScript。
+- `yarn dev` 和 `npm start` 会先将 `src/*.ts` 编译到 `dist/`，再启动 Electron。
+- dsh 使用 Electron 自带的 Node.js 运行，并通过 `--expose-internals` 满足 HMR 服务要求。
+- dsh `rc.6` 的 Web profile 使用了较多 peer dependencies；项目已在顶层固定所需依赖，
+  以兼容不会自动安装 peer dependencies 的 Yarn Classic。
+
+## 项目结构
+
+```text
+src/main.ts          Electron 主进程与窗口生命周期
+src/dsh-server.ts    dsh 进程启动、端口选择与就绪检测
+src/loading.html     本地服务启动和错误状态页
+test/                dsh 服务模块测试
+dist/                TypeScript 编译输出（不提交版本控制）
 ```

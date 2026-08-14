@@ -156,7 +156,7 @@ export async function waitForHttp(
   }
 
   throw new Error(
-    `DeepSeek Harness did not become ready within ${timeoutMs / 1_000} seconds.`,
+    `The local dsh service did not become ready within ${timeoutMs / 1_000} seconds.`,
     { cause: lastError }
   );
 }
