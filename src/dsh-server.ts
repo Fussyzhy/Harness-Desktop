@@ -24,11 +24,14 @@ interface WaitForHttpOptions {
   requestTimeoutMs?: number;
 }
 
-export function resolveDshCliPath(): string {
-  const packageJsonPath = require.resolve("@deepseek-ai/dsh/package.json");
+export function resolveDshPackageJsonPath(): string {
   return resolveAsarUnpackedPath(
-    path.join(path.dirname(packageJsonPath), "lib", "bin.js")
+    require.resolve("@deepseek-ai/dsh/package.json")
   );
+}
+
+export function resolveDshCliPath(): string {
+  return path.join(path.dirname(resolveDshPackageJsonPath()), "lib", "bin.js");
 }
 
 export function resolveAsarUnpackedPath(filePath: string): string {

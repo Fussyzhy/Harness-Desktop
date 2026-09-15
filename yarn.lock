@@ -2783,6 +2783,14 @@
   resolved "https://registry.npmmirror.com/@koromix/koffi-win32-x64/-/koffi-win32-x64-3.1.5.tgz#5b9e2507fb14823dd5ba6068e3bdd41385ec6681"
   integrity sha512-Pyo1WEHEP6Ek2NEn2pquwJzSPLOdY4vymoPSz0an1DgvFWSkOyBYYkGVoxL1ajfj5I1pPdXysYqixtVTzAtOfQ==
 
+"@liustack/modlens@3.26.1":
+  version "3.26.1"
+  resolved "https://registry.npmmirror.com/@liustack/modlens/-/modlens-3.26.1.tgz#e2921cf4751c7f4875248280e151708603ddeb2b"
+  integrity sha512-XMYMpBqboXZmYZVLtLT670EPDRUCndF2sVHMC6azryhl1UG3id0Hkdvz/41c9SV1vguBCVDpNPBy9eZp6uqBoQ==
+  dependencies:
+    commander "^13.1.0"
+    undici "^8.10.0"
+
 "@malept/cross-spawn-promise@^2.0.0":
   version "2.0.0"
   resolved "https://registry.npmmirror.com/@malept/cross-spawn-promise/-/cross-spawn-promise-2.0.0.tgz#d0772de1aa680a0bfb9ba2f32b4c828c7857cb9d"
@@ -3704,6 +3712,11 @@ combined-stream@^1.0.8:
   integrity sha512-FQN4MRfuJeHf7cBbBMJFXhKSDq+2kAArBlmRBvcvFE5BB1HZKXtSFASDhdlz9zOYwxh8lDdnvmMOe/+5cdoEdg==
   dependencies:
     delayed-stream "~1.0.0"
+
+commander@^13.1.0:
+  version "13.1.0"
+  resolved "https://registry.npmmirror.com/commander/-/commander-13.1.0.tgz#776167db68c78f38dcce1f9b8d7b8b9a488abf46"
+  integrity sha512-/rFeCpNJQbhSZjGVwO9RFV3xPqbnERS8MmIQzCtD/zl6gpJuV/bMLuN92oG3F7d8oDEHHRrujSXNUr8fpjntKw==
 
 commander@^15.0.0:
   version "15.0.0"

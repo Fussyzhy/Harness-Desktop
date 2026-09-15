@@ -8,6 +8,7 @@ import {
   startDshServer,
   waitForDshStartup
 } from "./dsh-server.js";
+import { ensureWebProfilePlugins } from "./dsh-profile.js";
 
 const DSH_HOST = "127.0.0.1";
 const APP_NAME = "Harness Desktop";
@@ -53,6 +54,39 @@ function appendLog(source: string, chunk: Buffer): void {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * List this application's bundled plugins in the dsh `web` profile before the
+ * service starts. A packaged build cannot run `dsh plugin add` — Electron's
+ * Node runtime ships neither npm nor corepack — so this is the only path by
+ * which a bundled plugin reaches a user. Failure is never fatal: the profile
+ * is an enhancement, and the service still starts on whatever dsh finds.
+ */
+function ensureProfilePlugins(): void {
+  try {
+    const result = ensureWebProfilePlugins();
+    const detail = result.reason
+      ? `${result.status} (${result.reason})`
+      : result.status;
+    appendLog("profile", Buffer.from(`web profile plugins: ${detail}`));
+
+    if (result.installed.length > 0) {
+      appendLog(
+        "profile",
+        Buffer.from(`installed into profile: ${result.installed.join(", ")}`)
+      );
+    }
+
+    if (result.bundles.length > 0) {
+      appendLog("profile", Buffer.from(`bundles: ${result.bundles.join(", ")}`));
+    }
+  } catch (error) {
+    appendLog(
+      "profile",
+      Buffer.from(`web profile plugin setup failed: ${errorMessage(error)}`)
+    );
+  }
 }
 
 async function updateLoadingStatus(message: string): Promise<void> {
@@ -239,6 +273,7 @@ async function startApplication(): Promise<void> {
   createTray();
   await createMainWindow();
   await updateLoadingStatus(`正在启动 ${APP_NAME}…`);
+  ensureProfilePlugins();
 
   const workingDirectory = app.isPackaged
     ? app.getPath("documents")

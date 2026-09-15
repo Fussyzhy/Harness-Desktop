@@ -16,7 +16,7 @@
     "predev": "npm run patch:dsh && tsc -p tsconfig.json",
     "dev": "electron .",
     "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
-    "test": "tsx --test test/dsh-server.test.ts test/dsh-directory-picker-patch.test.ts",
+    "test": "tsx --test test/dsh-server.test.ts test/dsh-directory-picker-patch.test.ts test/dsh-profile.test.ts",
     "package:dir": "npm run build && electron-builder --dir",
     "package:win": "npm run build && electron-builder --win nsis"
   },
@@ -77,7 +77,8 @@
     "@deepseek-ai/dsh-user-approval": "0.1.5-rc.2",
     "@deepseek-ai/dsh-util-time": "0.1.5-rc.2",
     "@deepseek-ai/dsh-util-workspace-path": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-workflow": "0.1.5-rc.2"
+    "@deepseek-ai/dsh-workflow": "0.1.5-rc.2",
+    "@liustack/modlens": "3.26.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
