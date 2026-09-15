@@ -1,7 +1,7 @@
 {
   "name": "harness-desktop",
   "productName": "Harness Desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "A TypeScript and Electron desktop client for DeepSeek Harness",
   "type": "module",
