@@ -6,11 +6,13 @@ const require = createRequire(import.meta.url);
 const {
   EXTERNAL_VIEW_READ_UTF16,
   PATCHED_READ_UTF16,
+  UPSTREAM_SAFE_READ_UTF16,
   VULNERABLE_READ_UTF16,
   patchWorkerSource
 } = require("../scripts/patch-dsh-directory-picker.cjs") as {
   EXTERNAL_VIEW_READ_UTF16: string;
   PATCHED_READ_UTF16: string;
+  UPSTREAM_SAFE_READ_UTF16: string;
   VULNERABLE_READ_UTF16: string;
   patchWorkerSource(source: string): string;
 };
@@ -35,6 +37,12 @@ test("directory-picker patch replaces the earlier external-view workaround", () 
 
 test("directory-picker patch is idempotent", () => {
   const source = `before\n${PATCHED_READ_UTF16}\nafter`;
+
+  assert.equal(patchWorkerSource(source), source);
+});
+
+test("directory-picker patch accepts the upstream safe decoder", () => {
+  const source = `before\n${UPSTREAM_SAFE_READ_UTF16}\nafter`;
 
   assert.equal(patchWorkerSource(source), source);
 });

@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   buildDshArguments,
+  extractDshUrl,
   getAvailablePort,
   resolveAsarUnpackedPath,
   waitForDshStartup,
@@ -43,12 +44,23 @@ test("dsh starts Electron's Node runtime with internal modules exposed", () => {
       "--expose-internals",
       "C:\\app\\dsh\\lib\\bin.js",
       "web",
+      "--no-open",
       "--host",
       "127.0.0.1",
       "--port",
       "12345"
     ]
   );
+});
+
+test("extractDshUrl reads the authenticated Web URL from dsh output", () => {
+  assert.equal(
+    extractDshUrl(
+      "dsh web: http://127.0.0.1:30123/?token=abc123\n"
+    ),
+    "http://127.0.0.1:30123/?token=abc123"
+  );
+  assert.equal(extractDshUrl("dsh starting\n"), undefined);
 });
 
 test("getAvailablePort returns a bindable local port", async (t) => {

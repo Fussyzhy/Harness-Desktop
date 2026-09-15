@@ -46,11 +46,17 @@ export function buildDshArguments({
     "--expose-internals",
     cliPath,
     "web",
+    "--no-open",
     "--host",
     host,
     "--port",
     String(port)
   ];
+}
+
+export function extractDshUrl(output: string): string | undefined {
+  const match = output.match(/\bdsh web:\s+(https?:\/\/\S+)/);
+  return match?.[1].replace(/[\r\n]+$/, "");
 }
 
 export async function getAvailablePort(host = "127.0.0.1"): Promise<number> {

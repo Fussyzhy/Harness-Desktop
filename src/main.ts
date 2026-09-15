@@ -4,6 +4,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   getAvailablePort,
+  extractDshUrl,
   startDshServer,
   waitForDshStartup
 } from "./dsh-server.js";
@@ -253,7 +254,20 @@ async function startApplication(): Promise<void> {
       port
     });
 
-    dshProcess.stdout?.on("data", (chunk: Buffer) => appendLog("dsh", chunk));
+    let dshOutput = "";
+    let resolveDshUrl: ((url: string) => void) | undefined;
+    const dshUrlReady = new Promise<string>((resolve) => {
+      resolveDshUrl = resolve;
+    });
+    dshProcess.stdout?.on("data", (chunk: Buffer) => {
+      appendLog("dsh", chunk);
+      dshOutput += chunk.toString();
+      const launchedUrl = extractDshUrl(dshOutput);
+      if (launchedUrl) {
+        dshUrl = launchedUrl;
+        resolveDshUrl?.(launchedUrl);
+      }
+    });
     dshProcess.stderr?.on("data", (chunk: Buffer) =>
       appendLog("dsh:error", chunk)
     );
@@ -281,6 +295,17 @@ async function startApplication(): Promise<void> {
     });
 
     await waitForDshStartup(dshProcess, dshUrl);
+    if (!dshUrl.includes("?token=")) {
+      await Promise.race([
+        dshUrlReady,
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("dsh did not report its authenticated Web URL.")),
+            5_000
+          )
+        )
+      ]);
+    }
     const window = mainWindow;
     if (!window || window.isDestroyed()) {
       return;
