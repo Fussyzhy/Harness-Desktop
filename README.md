@@ -188,6 +188,9 @@ Harness Desktop
   按钮直接画在页面上，所以主进程在每次加载完成后注入样式，用 `env(titlebar-area-*)` 预留出
   与该条带等高的顶部空间，并让这条带可拖拽。`box-sizing: border-box` 把内边距折进页面原有的
   `height: 100%`，使 Web UI 的实际可用高度正好等于窗口高度减去条带，不会溢出或出现滚动条。
+  这条带**必须自己上色**：`WINDOW_CHROME_CSS` 用 `WINDOW_CHROME_COLOR` 刷底，并把同一个颜色交给
+  `titleBarOverlay.color`。少了任何一半都会出现"三块互不相干的颜色"——没人画的预留区会露出页面
+  自己的背景（dsh 在那里画的是一条浅色渐变），而 overlay 又只在右侧 138px 画一块按钮底座。
 - dsh 通过 Electron 内置 Node.js 运行，并使用 `--expose-internals` 满足 HMR 服务要求。
 - 生产依赖会放入 `app.asar.unpacked`，保证动态插件和原生模块可被子进程加载。
 - 项目在顶层固定 dsh Web profile 所需的 peer dependencies，以兼容 Yarn Classic。

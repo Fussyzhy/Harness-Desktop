@@ -31,7 +31,19 @@ const LOADING_PAGE_URL = pathToFileURL(LOADING_PAGE_PATH).href;
  * remaining content area instead of overflowing the window. The pseudo element
  * keeps the reserved strip draggable, which is the only title bar the window
  * has.
+ *
+ * The strip is painted `WINDOW_CHROME_COLOR` and the native overlay is given
+ * that same colour. Neither is optional: a reserved strip nobody paints shows
+ * whatever the page happens to have behind it (dsh paints a light gradient
+ * there), and the overlay is a second block around the buttons, so the window
+ * ends up with a gradient band, a dark button block and the native glyphs — all
+ * three unrelated. One colour makes the strip and its buttons read as a single
+ * surface.
  */
+const WINDOW_CHROME_HEIGHT = 32;
+/** The surface dsh shows directly under the strip, so the two read as one. */
+const WINDOW_CHROME_COLOR = "#232424";
+
 const WINDOW_CHROME_CSS = `
   html::before {
     content: "";
@@ -39,15 +51,16 @@ const WINDOW_CHROME_CSS = `
     top: env(titlebar-area-y, 0px);
     left: env(titlebar-area-x, 0px);
     width: env(titlebar-area-width, calc(100% - 138px));
-    height: env(titlebar-area-height, 32px);
+    height: env(titlebar-area-height, ${WINDOW_CHROME_HEIGHT}px);
     z-index: 2147483647;
+    background: ${WINDOW_CHROME_COLOR};
     -webkit-app-region: drag;
   }
 
   body {
     box-sizing: border-box;
     padding-top: calc(
-      env(titlebar-area-y, 0px) + env(titlebar-area-height, 32px)
+      env(titlebar-area-y, 0px) + env(titlebar-area-height, ${WINDOW_CHROME_HEIGHT}px)
     );
   }
 `;
@@ -322,9 +335,9 @@ async function createMainWindow(): Promise<void> {
     title: APP_NAME,
     titleBarStyle: "hidden",
     titleBarOverlay: {
-      color: "#15171a",
+      color: WINDOW_CHROME_COLOR,
       symbolColor: "#ffffff",
-      height: 32
+      height: WINDOW_CHROME_HEIGHT
     },
     webPreferences: {
       contextIsolation: true,
