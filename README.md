@@ -132,16 +132,32 @@ dsh 依赖里对应的位置，每个补丁都锁定 dsh 版本，且在当前�
 | `patch-dsh-directory-picker.cjs` | 目录选择器在 Windows 上读取路径时崩溃 |
 | `patch-dsh-settings-open.cjs` | 打开设置文档时异常被吞掉、按钮卡住 |
 | `patch-dsh-open-in-app.cjs` | “在本地打开”无法启动 VS Code 等 Electron 应用 |
+| `patch-dsh-win32-process-console-window.cjs` | agent 每执行一条命令都会弹出黑色控制台窗口 |
 
 最后一个补丁修的是：被启动的桌面程序从 dsh 继承了 `ELECTRON_RUN_AS_NODE=1`，于是 VS Code、
 VS Code Insiders、Cursor、Windsurf 这些 Electron 程序被当成 Node 进程启动，几十毫秒内就带着
 `node:internal/modules/cjs/loader` 错误退出，界面显示“打开失败”。补丁只从**被启动的桌面程序**
 继承的环境里去掉这个变量（资源管理器、Git Bash 不受影响，GitHub Desktop 自己声明的仍保留）。
 
+控制台窗口补丁修的是：本应用把 dsh 跑在 Electron 里，Electron 主进程和它启动的 Job runner 都是
+GUI 子系统进程、**都没有控制台**（`windowsHide` 只对控制台子系统程序生效，对它们无效）。runner
+用 `CreateProcessW` 创建真正的命令进程，而目标 pwsh 是控制台子系统程序、父进程又没有控制台，
+Windows 于是给它**新建一个自己的可见控制台**——每条命令一个黑框，一直留到命令结束。补丁给这次
+创建的 creation flags 加上 `CREATE_NO_WINDOW`（0x08000000），目标进程不再有可见控制台，stdio
+仍走 runner 传下来的管道，命令行为不变。只改普通命令路径 `spawnCurrentTokenJobProcess`：受限
+令牌沙箱的 `CreateProcessAsUserW` 路径**不能**加这个标志（受限进程会在 DLL 初始化阶段以
+`STATUS_DLL_INIT_FAILED` 0xC0000142 死亡，见 dsh-sandbox-windows-acl 的说明），保持原样。
+
 已安装的客户端也可以就地修好，不必重新打包——它的依赖就在 `app.asar.unpacked` 里：
 
 ```powershell
 node scripts/patch-dsh-open-in-app.cjs --modules "$env:LOCALAPPDATA\Programs\Harness Desktop\resources\app.asar.unpacked\node_modules"
+```
+
+每个补丁脚本都接受同样的 `--modules` 参数，可以单独就地执行，例如修掉命令窗口的问题：
+
+```powershell
+node scripts/patch-dsh-win32-process-console-window.cjs --modules "$env:LOCALAPPDATA\Programs\Harness Desktop\resources\app.asar.unpacked\node_modules"
 ```
 
 > 补丁改的是 node_modules，`yarn patch:app` 不覆盖它；重新打包安装后无需再执行。

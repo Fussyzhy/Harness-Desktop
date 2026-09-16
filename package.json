@@ -7,7 +7,7 @@
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
-    "patch:dsh": "node scripts/patch-dsh-directory-picker.cjs && node scripts/patch-dsh-settings-open.cjs && node scripts/patch-dsh-open-in-app.cjs",
+    "patch:dsh": "node scripts/patch-dsh-directory-picker.cjs && node scripts/patch-dsh-settings-open.cjs && node scripts/patch-dsh-open-in-app.cjs && node scripts/patch-dsh-win32-process-console-window.cjs",
     "postinstall": "npm run patch:dsh",
     "prebuild": "npm run patch:dsh",
     "build": "tsc -p tsconfig.json",
@@ -16,7 +16,7 @@
     "predev": "npm run patch:dsh && tsc -p tsconfig.json",
     "dev": "electron .",
     "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
-    "test": "tsx --test test/dsh-server.test.ts test/dsh-directory-picker-patch.test.ts test/dsh-settings-open-patch.test.ts test/dsh-open-in-app-patch.test.ts test/dsh-profile.test.ts",
+    "test": "tsx --test test/dsh-server.test.ts test/dsh-directory-picker-patch.test.ts test/dsh-settings-open-patch.test.ts test/dsh-open-in-app-patch.test.ts test/dsh-win32-process-console-window-patch.test.ts test/dsh-profile.test.ts",
     "package:dir": "npm run build && electron-builder --dir",
     "package:win": "npm run build && electron-builder --win nsis",
     "patch:app": "node scripts/patch-installed-app.cjs"
