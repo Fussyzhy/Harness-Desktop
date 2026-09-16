@@ -23,7 +23,7 @@
 ---
 
 Harness Desktop 是一个基于 TypeScript 和 Electron 的 DeepSeek Harness 桌面客户端。
-应用启动时会运行安装包内固定版本 `0.1.5-rc.2` 的 `@deepseek-ai/dsh web`，等待本地服务就绪，
+应用启动时会运行安装包内固定版本 `0.1.6-alpha.1` 的 `@deepseek-ai/dsh web`，等待本地服务就绪，
 再将完整 Web UI 加载到桌面窗口中。
 
 > 当前项目处于早期预览阶段，重点是提供稳定、可运行、可分发的 Windows 桌面体验。
