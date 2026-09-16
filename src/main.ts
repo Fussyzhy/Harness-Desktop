@@ -13,6 +13,7 @@ import {
   DSH_RESTART_EXIT_CODE,
   preparePluginManagerEnvironment
 } from "./dsh-plugins.js";
+import { PetOverlayController } from "./pet-overlay.js";
 
 const DSH_HOST = "127.0.0.1";
 const APP_NAME = "Harness Desktop";
@@ -65,6 +66,25 @@ const WINDOW_CHROME_CSS = `
   }
 `;
 
+/**
+ * Hides the in-window pet while the floating one is on screen.
+ *
+ * The live2d pet reaches the page as a plugin client, so the shell has no
+ * handle on it; what it does have is a stable shape. The plugin renders into a
+ * `popover` element it appends straight to `body` and puts its canvas inside
+ * (`dsh-live2d-pets` client half, the top-layer container). Matching on that
+ * shape keeps the settings panel — which is where the pet is configured — out
+ * of the rule, and `:has()` is what distinguishes it from any other popover.
+ *
+ * Inserted only while the overlay is visible, so switching the overlay off from
+ * the tray brings the in-window pet straight back.
+ */
+const IN_WINDOW_PET_HIDE_CSS = `
+  body > div[popover]:has(canvas) {
+    display: none !important;
+  }
+`;
+
 let mainWindow: BrowserWindow | undefined;
 let tray: Tray | undefined;
 let dshProcess: ChildProcess | undefined;
@@ -81,6 +101,13 @@ let dshGeneration = 0;
 /** Prepared once after `ready`; `undefined` until then. */
 let pluginManagerEnv: Record<string, string> | undefined;
 let isRestartingDsh = false;
+/** The floating desktop pet; `undefined` until the application starts. */
+let petOverlay: PetOverlayController | undefined;
+/**
+ * Handle of the injected "hide the in-window pet" stylesheet. It dies with the
+ * document, so every load starts from `undefined` again.
+ */
+let inWindowPetCssKey: string | undefined;
 
 function appendLog(source: string, chunk: Buffer): void {
   const lines = chunk
@@ -229,6 +256,10 @@ function stopDshServer(): void {
   dshProcess = undefined;
   dshGeneration += 1;
 
+  // No service means no pet state: hide the floating pet until the next start
+  // reports its URL. The window itself survives, so a restart is just a reload.
+  void petOverlay?.setDshUrl(undefined);
+
   if (child && !child.killed) {
     child.kill();
   }
@@ -280,7 +311,46 @@ function configureWindowChrome(window: BrowserWindow): void {
     void window.webContents.insertCSS(WINDOW_CHROME_CSS).catch((error) => {
       console.error("Failed to install the window chrome stylesheet.", error);
     });
+    // Inserted stylesheets do not survive a navigation, and installing a plugin
+    // reloads this window onto a new origin.
+    inWindowPetCssKey = undefined;
+    void syncInWindowPet();
   });
+}
+
+/**
+ * Keep the in-window pet hidden exactly while the floating one is showing.
+ *
+ * Both pets read the same plugin state, so leaving both visible would put two
+ * copies of the same character on screen; hiding both would strand a user who
+ * switched the overlay off in the tray.
+ */
+async function syncInWindowPet(): Promise<void> {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) {
+    inWindowPetCssKey = undefined;
+    return;
+  }
+
+  const shouldHide = petOverlay?.isVisible() === true;
+  if (shouldHide && inWindowPetCssKey === undefined) {
+    try {
+      inWindowPetCssKey = await window.webContents.insertCSS(IN_WINDOW_PET_HIDE_CSS);
+    } catch (error) {
+      console.error("Failed to hide the in-window pet.", error);
+    }
+    return;
+  }
+
+  if (!shouldHide && inWindowPetCssKey !== undefined) {
+    const key = inWindowPetCssKey;
+    inWindowPetCssKey = undefined;
+    try {
+      await window.webContents.removeInsertedCSS(key);
+    } catch {
+      // The document that owned the key is gone; nothing left to remove.
+    }
+  }
 }
 
 function showMainWindow(): void {
@@ -310,16 +380,38 @@ function quitApplication(): void {
   app.quit();
 }
 
+/**
+ * The tray menu owns the floating-pet switch.
+ *
+ * It is rebuilt on every toggle instead of mutating one item: `type: "checkbox"`
+ * flips its own `checked` flag before the click handler runs, so reading the
+ * controller afterwards is the only way to keep the checkbox and the actual
+ * window state agreeing.
+ */
+function buildTrayMenu(): Menu {
+  return Menu.buildFromTemplate([
+    { label: "打开", click: showMainWindow },
+    {
+      label: "桌宠悬浮在桌面",
+      type: "checkbox",
+      checked: petOverlay?.isUserEnabled() === true,
+      click: () => {
+        if (!petOverlay) {
+          return;
+        }
+        petOverlay.setUserEnabled(!petOverlay.isUserEnabled());
+        tray?.setContextMenu(buildTrayMenu());
+      }
+    },
+    { label: "关闭", click: quitApplication }
+  ]);
+}
+
 function createTray(): void {
   const icon = nativeImage.createFromPath(APP_ICON_PATH);
   tray = new Tray(icon);
   tray.setToolTip(APP_NAME);
-  tray.setContextMenu(
-    Menu.buildFromTemplate([
-      { label: "打开", click: showMainWindow },
-      { label: "关闭", click: quitApplication }
-    ])
-  );
+  tray.setContextMenu(buildTrayMenu());
   tray.on("click", showMainWindow);
 }
 
@@ -485,6 +577,9 @@ async function startDshService(): Promise<void> {
 
   await window.loadURL(dshUrl);
   hasLoadedDsh = true;
+  // Point the floating pet at this service. A restart takes a new port, so this
+  // also reloads the overlay page onto the new origin.
+  void petOverlay?.setDshUrl(dshUrl);
 }
 
 /**
@@ -517,6 +612,18 @@ async function restartDshService(reason: string): Promise<void> {
 
 async function startApplication(): Promise<void> {
   createTray();
+
+  petOverlay = new PetOverlayController({
+    appRoot: app.getAppPath(),
+    userDataDir: app.getPath("userData"),
+    log: (message) => appendLog("pet", Buffer.from(message)),
+    // Double click on the floating pet means "bring the client back".
+    openClient: showMainWindow
+  });
+  petOverlay.onVisibilityChange(() => {
+    void syncInWindowPet();
+  });
+
   await createMainWindow();
   await updateLoadingStatus(`正在启动 ${APP_NAME}…`);
   // The profile and the plugin-manager environment are prepared inside
@@ -556,5 +663,7 @@ app.on("before-quit", () => {
   isQuitting = true;
   tray?.destroy();
   tray = undefined;
+  petOverlay?.dispose();
+  petOverlay = undefined;
   stopDshServer();
 });

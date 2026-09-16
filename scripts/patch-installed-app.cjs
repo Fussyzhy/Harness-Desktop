@@ -19,7 +19,14 @@ const REPO_ROOT = path.join(__dirname, "..");
  * scripts, no devDependencies) before packing, so the repository copy is not a
  * drop-in replacement. A version bump still needs a real repackage.
  */
-const PACKED_SOURCES = ["dist", "src/loading.html", "build/icon.png"];
+const PACKED_SOURCES = [
+  "dist",
+  "src/loading.html",
+  "src/pet-overlay.html",
+  "src/pet-overlay-page.js",
+  "src/pet-overlay-preload.cjs",
+  "build/icon.png"
+];
 
 const DEFAULT_RESOURCES = path.join(
   process.env.LOCALAPPDATA ?? process.env.HOME ?? "",
@@ -32,8 +39,9 @@ function usage() {
   return [
     "Usage: node scripts/patch-installed-app.cjs [options]",
     "",
-    "把仓库当前构建出的 dist / loading.html / icon / package.json 写进已安装",
-    "客户端的 app.asar。必须在 Harness Desktop 完全退出后运行。",
+    "把仓库当前构建出的 dist / src 页面资源 / icon 写进已安装客户端的 app.asar。",
+    "已存在的文件就地替换，本版本新增的文件会被追加进去。",
+    "必须在 Harness Desktop 完全退出后运行。",
     "",
     "Options:",
     "  --resources <dir>  Electron resources 目录。",
@@ -100,6 +108,32 @@ function collectLeaves(header) {
   return leaves;
 }
 
+/**
+ * Splice a file this archive has never carried into its header tree, creating
+ * whatever directories the path needs. An asar header is plain nested `files`
+ * maps, so a new leaf is just another key — only its `offset` has to line up
+ * with the payload appended behind the existing entries.
+ */
+function insertLeaf(header, asarPath, entry) {
+  const parts = asarPath.split("/");
+  let directory = header;
+
+  for (const name of parts.slice(0, -1)) {
+    if (!directory.files) {
+      directory.files = {};
+    }
+    if (!directory.files[name]) {
+      directory.files[name] = { files: {} };
+    }
+    directory = directory.files[name];
+  }
+
+  if (!directory.files) {
+    directory.files = {};
+  }
+  directory.files[parts[parts.length - 1]] = entry;
+}
+
 /** Read the packed payload straight from the repository working tree. */
 function collectRepoFiles() {
   const files = new Map();
@@ -146,12 +180,14 @@ function newestMtime(directory) {
  * Rebuild one archive from the repository payload plus whatever the installed
  * archive already carries. Packed entries keep their original order; offsets and
  * SHA256 integrity blocks are recomputed because a size change shifts every
- * following byte.
+ * following byte. Files the installed archive has never carried are appended,
+ * so a release that only adds assets does not force a full repackage.
  */
 async function rebakeArchive(original, repoFiles) {
   const chunks = [];
   const contents = new Map();
   const changed = [];
+  const added = [];
   const absent = new Set(repoFiles.keys());
   let offset = 0;
 
@@ -181,6 +217,27 @@ async function rebakeArchive(original, repoFiles) {
     contents.set(leaf.path, content);
   }
 
+  // Anything left in `absent` is a file this release adds. electron-builder's
+  // `files` globs grow over time, and the desktop pet brings three page assets
+  // the installed archive predates; appending them keeps "install this build"
+  // a rewrite of the ~5 MB archive instead of a 150 MB repackage.
+  const mirroredIntegrity = collectLeaves(original.header).some((leaf) => leaf.entry.integrity);
+
+  for (const asarPath of [...absent].sort()) {
+    const content = repoFiles.get(asarPath);
+    const entry = { size: content.length, offset: String(offset) };
+    if (mirroredIntegrity) {
+      entry.integrity = await getFileIntegrity(Readable.from(content));
+    }
+
+    insertLeaf(original.header, asarPath, entry);
+    absent.delete(asarPath);
+    added.push(asarPath);
+    offset += content.length;
+    chunks.push(content);
+    contents.set(asarPath, content);
+  }
+
   const headerPickle = Pickle.createEmpty();
   headerPickle.writeString(JSON.stringify(original.header));
   const headerBuffer = headerPickle.toBuffer();
@@ -193,7 +250,8 @@ async function rebakeArchive(original, repoFiles) {
     archive: Buffer.concat([sizeBuffer, headerBuffer, ...chunks]),
     contents,
     changed,
-    // Files the repository builds that this archive does not carry at all.
+    added,
+    // Files the repository builds that this archive still cannot carry.
     absent: [...absent]
   };
 }
@@ -249,24 +307,30 @@ async function main() {
   console.log(`原 app.asar：${original.buffer.length} 字节，sha256 ${sha256(original.buffer)}`);
   console.log(`打包文件：${result.contents.size} 个`);
 
+  if (result.added.length > 0) {
+    console.log(`新增文件：${result.added.length} 个`);
+    for (const added of result.added) {
+      console.log(`  + ${added}`);
+    }
+  }
+
   if (result.absent.length > 0) {
-    console.warn(
-      `警告：仓库里有 ${result.absent.length} 个文件不在 app.asar 中（本工具只替换、不新增）：`
-    );
+    console.warn(`警告：仓库里有 ${result.absent.length} 个文件无法写入 app.asar：`);
     for (const absent of result.absent.slice(0, 10)) {
       console.warn(`  ${absent}`);
     }
-    console.warn("  需要新增文件时，请改用 npm run package:dir 重新打包。");
   }
 
-  if (result.changed.length === 0) {
+  if (result.changed.length === 0 && result.added.length === 0) {
     console.log("已安装客户端的内容就是最新的，无需修改。");
     return 0;
   }
 
-  console.log("将要更新：");
-  for (const changed of result.changed) {
-    console.log(`  ${changed}`);
+  if (result.changed.length > 0) {
+    console.log("将要更新：");
+    for (const changed of result.changed) {
+      console.log(`  ${changed}`);
+    }
   }
 
   if (options.dryRun) {

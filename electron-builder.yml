@@ -9,6 +9,12 @@ directories:
 files:
   - dist/**/*
   - src/loading.html
+  # The floating pet's page, its script, and its sandboxed preload (hand-written
+  # CommonJS: a sandboxed preload cannot be an ES module, so it is shipped as an
+  # asset rather than compiled by tsc).
+  - src/pet-overlay.html
+  - src/pet-overlay-page.js
+  - src/pet-overlay-preload.cjs
   - build/icon.png
   - plugins/**/*
   - package.json
