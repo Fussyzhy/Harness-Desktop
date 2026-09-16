@@ -1,0 +1,8 @@
+# dsh bundle layer: mount the Harness Desktop plugin manager.
+#
+# The package ships with the application rather than from a registry, so this
+# name is resolved from the profile's own node_modules — where the desktop shell
+# copies it on every start (see `ensureWebProfilePlugins` in src/dsh-profile.ts).
+- insert:
+    - id: harness-desktop-plugin-manager
+      name: '@harness-desktop/dsh-plugin-manager'

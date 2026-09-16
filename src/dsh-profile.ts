@@ -2,7 +2,8 @@ import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeF
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import path from "node:path";
-import { resolveDshPackageJsonPath } from "./dsh-server.js";
+import { fileURLToPath } from "node:url";
+import { resolveAsarUnpackedPath, resolveDshPackageJsonPath } from "./dsh-server.js";
 
 /**
  * Plugin bundles this application installs into the dsh `web` profile so they
@@ -15,13 +16,50 @@ import { resolveDshPackageJsonPath } from "./dsh-server.js";
  */
 export const BUNDLED_PROFILE_PLUGINS: readonly string[] = ["@liustack/modlens"];
 
+/** A plugin bundle shipped as a plain directory inside this application. */
+export interface LocalProfilePlugin {
+  /** Package name, exactly as dsh must see it in `dsh.profile.bundles`. */
+  name: string;
+  /** Directory holding the package, relative to the application root. */
+  directory: string;
+}
+
+/**
+ * Plugin bundles that travel with the application itself instead of coming from
+ * a registry.
+ *
+ * A local bundle is deliberately *not* a dependency of this package: dsh
+ * resolves a bundle from the installation anchor first and from the profile
+ * second, so a name that exists in both places takes its patch layer from one
+ * copy and its runtime module from the other. Keeping the manager out of
+ * `node_modules` leaves exactly one copy — the one this module writes into the
+ * profile — for both halves to resolve.
+ */
+export const BUNDLED_LOCAL_PROFILE_PLUGINS: readonly LocalProfilePlugin[] = [
+  {
+    name: "@harness-desktop/dsh-plugin-manager",
+    directory: path.join("plugins", "dsh-plugin-manager")
+  }
+];
+
 /**
  * The dsh release whose shipped `web` profile template this module mirrors.
  * A `web` profile that does not exist yet is only created while the installed
  * dsh matches, because inventing a template for an unknown release risks
  * writing a composition that release cannot mount.
+ *
+ * A stale value does not fail loudly — it turns profile creation into a silent
+ * no-op, so a fresh machine boots without any bundled plugin (the template
+ * check above is the only thing that would have written them). The value is
+ * therefore asserted against the pinned `@deepseek-ai/dsh` dependency and the
+ * installed package by `test/dsh-version-drift.test.ts`.
+ *
+ * `0.1.6-alpha.1` was verified against the release itself: a profile that dsh
+ * creates from its own template carries `["@deepseek-ai/dsh-base",
+ * "@deepseek-ai/dsh-web-app"]`, `patchReload: "live"`, and the same
+ * `pnpm-workspace.yaml` this module writes.
  */
-export const SUPPORTED_DSH_VERSION = "0.1.5-rc.2";
+export const SUPPORTED_DSH_VERSION = "0.1.6-alpha.1";
 
 /** Environment variable that overrides the default dsh home. */
 export const DSH_HOME_ENV = "DSH_HOME";
@@ -83,6 +121,10 @@ export interface ProfilePluginResult {
 export interface EnsureWebProfileOptions {
   /** Managed bundles to guarantee; defaults to {@link BUNDLED_PROFILE_PLUGINS}. */
   additions?: readonly string[];
+  /** Application-local bundles to guarantee; defaults to {@link BUNDLED_LOCAL_PROFILE_PLUGINS}. */
+  localAdditions?: readonly LocalProfilePlugin[];
+  /** Application root holding local bundles; defaults to this module's own. */
+  appRoot?: string;
   /** dsh home; defaults to the value dsh itself would resolve. */
   home?: string;
   /** File inside the dsh installation used as the first resolution anchor. */
@@ -156,6 +198,11 @@ export function readInstalledDshVersion(
  */
 export function ensureWebProfilePlugins({
   additions = BUNDLED_PROFILE_PLUGINS,
+  // Empty by default so this function stays a pure function of its arguments:
+  // the application passes {@link BUNDLED_LOCAL_PROFILE_PLUGINS} explicitly, and
+  // a test that passes none never reads this repository's own `plugins/` tree.
+  localAdditions = [],
+  appRoot = defaultAppRoot(),
   home = resolveDshHome(),
   installAnchor = resolveDshPackageJsonPath(),
   installedDshVersion
@@ -163,7 +210,7 @@ export function ensureWebProfilePlugins({
   const profileDir = resolveWebProfileDir(home);
   const manifestPath = path.join(profileDir, PROFILE_MANIFEST_FILENAME);
 
-  const mountable: { name: string; sourceDir: string }[] = [];
+  const mountable: { name: string; sourceDir: string; local?: boolean }[] = [];
   const unmountable: string[] = [];
   for (const name of additions) {
     const sourceDir = resolveBundleDir(name, installAnchor, profileDir);
@@ -176,6 +223,21 @@ export function ensureWebProfilePlugins({
       unmountable.push(name);
     } else {
       mountable.push({ name, sourceDir });
+    }
+  }
+
+  for (const plugin of localAdditions) {
+    const sourceDir = resolveLocalBundleDir(plugin, appRoot);
+    if (
+      sourceDir === undefined ||
+      readBundlePatch(path.join(sourceDir, PROFILE_MANIFEST_FILENAME)) === undefined
+    ) {
+      unmountable.push(plugin.name);
+    } else {
+      // Local bundles ship with the application, so the profile copy is always
+      // refreshed: a client half that lags the shipped one is a boot failure,
+      // not a stale feature.
+      mountable.push({ name: plugin.name, sourceDir, local: true });
     }
   }
 
@@ -239,7 +301,11 @@ export function ensureWebProfilePlugins({
   const installed =
     outcome.status === "skipped"
       ? []
-      : installProfileModules(profileDir, mountable);
+      : installProfileModules(
+          profileDir,
+          mountable,
+          new Set(Object.keys(manifest?.dependencies ?? {}))
+        );
 
   return { ...outcome, profileDir, installed };
 }
@@ -296,20 +362,39 @@ function createWebProfile({
  * names actually (re)written.
  *
  * The copy is what makes the composed row importable, and it mirrors the
- * hoisted layout the profile's `pnpm-workspace.yaml` asks pnpm for. An
- * unchanged copy is left alone, so a warm launch pays one manifest read.
+ * hoisted layout the profile's `pnpm-workspace.yaml` asks pnpm for. A registry
+ * plugin whose copy already carries the installed version is left alone, so a
+ * warm launch pays one manifest read; a plugin this application ships itself is
+ * always refreshed (see {@link installProfileModule}).
  */
 function installProfileModules(
   profileDir: string,
-  packages: readonly { name: string; sourceDir: string }[]
+  packages: readonly { name: string; sourceDir: string; local?: boolean }[],
+  userOwned: ReadonlySet<string> = new Set()
 ): string[] {
   const modulesDir = path.join(profileDir, MODULES_DIR_NAME);
   const installed: string[] = [];
 
   for (const entry of packages) {
     try {
-      if (installProfileModule(entry.name, entry.sourceDir, modulesDir)) {
-        installed.push(entry.name);
+      const written = installProfileModule(entry.name, entry.sourceDir, modulesDir, {
+        force: entry.local === true
+      });
+      if (!written) {
+        continue;
+      }
+
+      installed.push(entry.name);
+      if (entry.local !== true && userOwned.has(entry.name)) {
+        // A user-installed copy of a built-in plugin is the one case where the
+        // profile holds a version this application did not put there, and it
+        // cannot be honoured: a bundle's patch layer resolves from the
+        // installation anchor first, so two versions would mix one copy's patch
+        // file with the other copy's code. The application's copy stands, and
+        // the log says which plugin it replaced.
+        console.warn(
+          `Restored the bundled ${entry.name} over the copy in ${modulesDir}: bundles this application manages are version-locked to it.`
+        );
       }
     } catch (error) {
       console.warn(
@@ -325,7 +410,8 @@ function installProfileModules(
 function installProfileModule(
   packageName: string,
   sourceDir: string,
-  modulesDir: string
+  modulesDir: string,
+  { force = false }: { force?: boolean } = {}
 ): boolean {
   const targetDir = path.join(modulesDir, packageName);
   if (path.resolve(sourceDir) === path.resolve(targetDir)) {
@@ -337,7 +423,7 @@ function installProfileModule(
   const installedVersion = readManifest(
     path.join(targetDir, PROFILE_MANIFEST_FILENAME)
   )?.version;
-  if (installedVersion !== undefined && installedVersion === sourceVersion) {
+  if (!force && installedVersion !== undefined && installedVersion === sourceVersion) {
     return false;
   }
 
@@ -357,6 +443,27 @@ function installProfileModule(
   }
 
   return true;
+}
+
+/**
+ * The directory an application-local bundle lives in, mapped out of `app.asar`
+ * because the copy reads it as a real file tree.
+ *
+ * Local bundles never resolve through `node_modules`: they are not dependencies
+ * of this package, and dsh finds them in the profile directory this module
+ * writes them to.
+ */
+export function resolveLocalBundleDir(
+  plugin: LocalProfilePlugin,
+  appRoot: string
+): string | undefined {
+  const dir = resolveAsarUnpackedPath(path.join(appRoot, plugin.directory));
+  return existsSync(path.join(dir, PROFILE_MANIFEST_FILENAME)) ? dir : undefined;
+}
+
+/** This application's root: `<root>/dist/dsh-profile.js` is one level down. */
+export function defaultAppRoot(): string {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 }
 
 /**

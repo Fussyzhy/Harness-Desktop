@@ -8,7 +8,11 @@ import {
   startDshServer,
   waitForDshStartup
 } from "./dsh-server.js";
-import { ensureWebProfilePlugins } from "./dsh-profile.js";
+import { BUNDLED_LOCAL_PROFILE_PLUGINS, ensureWebProfilePlugins } from "./dsh-profile.js";
+import {
+  DSH_RESTART_EXIT_CODE,
+  preparePluginManagerEnvironment
+} from "./dsh-plugins.js";
 
 const DSH_HOST = "127.0.0.1";
 const APP_NAME = "Harness Desktop";
@@ -55,6 +59,15 @@ let dshUrl: string | undefined;
 let isQuitting = false;
 let hasLoadedDsh = false;
 const recentLogs: string[] = [];
+/**
+ * Bumped whenever the service is stopped or replaced. A start that is still
+ * awaiting readiness compares its own generation and drops out instead of
+ * loading a window that another start already owns.
+ */
+let dshGeneration = 0;
+/** Prepared once after `ready`; `undefined` until then. */
+let pluginManagerEnv: Record<string, string> | undefined;
+let isRestartingDsh = false;
 
 function appendLog(source: string, chunk: Buffer): void {
   const lines = chunk
@@ -77,14 +90,16 @@ function errorMessage(error: unknown): string {
 
 /**
  * List this application's bundled plugins in the dsh `web` profile before the
- * service starts. A packaged build cannot run `dsh plugin add` — Electron's
- * Node runtime ships neither npm nor corepack — so this is the only path by
- * which a bundled plugin reaches a user. Failure is never fatal: the profile
- * is an enhancement, and the service still starts on whatever dsh finds.
+ * service starts. A launch has no package manager to call: Electron's Node
+ * runtime ships neither npm nor corepack, and the bundled pnpm is only wired up
+ * for the plugin manager's own installs. Failure is never fatal — the profile is
+ * an enhancement, and the service still starts on whatever dsh finds.
  */
 function ensureProfilePlugins(): void {
   try {
-    const result = ensureWebProfilePlugins();
+    const result = ensureWebProfilePlugins({
+      localAdditions: BUNDLED_LOCAL_PROFILE_PLUGINS
+    });
     const detail = result.reason
       ? `${result.status} (${result.reason})`
       : result.status;
@@ -106,6 +121,37 @@ function ensureProfilePlugins(): void {
       Buffer.from(`web profile plugin setup failed: ${errorMessage(error)}`)
     );
   }
+}
+
+/**
+ * Build the environment that lets the bundled plugin manager install plugins:
+ * the pnpm shipped with this application, reached through a shim the dsh child
+ * finds on `PATH`.
+ *
+ * Failure is not fatal — the service still starts, and the plugin card reports
+ * that installation is unavailable — but it is worth a log line, because the
+ * only realistic cause is a broken installation.
+ */
+function resolvePluginManagerEnv(): Record<string, string> {
+  if (pluginManagerEnv !== undefined) {
+    return pluginManagerEnv;
+  }
+
+  try {
+    const { env, shimPath } = preparePluginManagerEnvironment({
+      userDataDir: app.getPath("userData")
+    });
+    appendLog("plugins", Buffer.from(`pnpm shim: ${shimPath}`));
+    pluginManagerEnv = env;
+  } catch (error) {
+    appendLog(
+      "plugins",
+      Buffer.from(`plugin installation unavailable: ${errorMessage(error)}`)
+    );
+    pluginManagerEnv = {};
+  }
+
+  return pluginManagerEnv;
 }
 
 async function updateLoadingStatus(message: string): Promise<void> {
@@ -144,13 +190,35 @@ async function showProcessError(title: string, error: unknown): Promise<void> {
   await showStartupError(title, error);
 }
 
-function stopDshServer(): void {
-  if (!dshProcess || dshProcess.killed) {
+/** Show the loading page and set its status line, whatever it currently shows. */
+async function showLoadingPage(message: string): Promise<void> {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) {
     return;
   }
 
-  dshProcess.kill();
+  if (window.webContents.getURL() !== LOADING_PAGE_URL) {
+    await window.loadFile(LOADING_PAGE_PATH);
+  }
+
+  await updateLoadingStatus(message);
+}
+
+/**
+ * Stop the service and invalidate any start still in flight.
+ *
+ * The reference is cleared before the kill so the exit handler can tell a
+ * deliberate stop from a crash: the child it hears from is no longer the
+ * current one, so it stays silent.
+ */
+function stopDshServer(): void {
+  const child = dshProcess;
   dshProcess = undefined;
+  dshGeneration += 1;
+
+  if (child && !child.killed) {
+    child.kill();
+  }
 }
 
 function isDshUrl(url: string): boolean {
@@ -288,87 +356,167 @@ async function createMainWindow(): Promise<void> {
   await window.loadFile(LOADING_PAGE_PATH);
 }
 
-async function startApplication(): Promise<void> {
-  createTray();
-  await createMainWindow();
-  await updateLoadingStatus(`正在启动 ${APP_NAME}…`);
-  ensureProfilePlugins();
-
+/**
+ * Start (or restart) the dsh service and load its Web UI into the window.
+ *
+ * Installing a plugin only takes effect at boot — a bundle joins the profile's
+ * layer stack while dsh starts — so the plugin manager finishes by asking for a
+ * restart, and this is the function that performs it. Every start captures a
+ * generation token: one that has been superseded (by a restart, or by the user
+ * quitting) stops touching shared state instead of racing the newer one.
+ */
+async function startDshService(): Promise<void> {
+  const generation = (dshGeneration += 1);
   const workingDirectory = app.isPackaged
     ? app.getPath("documents")
     : process.cwd();
 
-  try {
-    const port = await getAvailablePort(DSH_HOST);
-    dshUrl = `http://${DSH_HOST}:${port}`;
-    dshProcess = startDshServer({
-      electronPath: process.execPath,
-      cwd: workingDirectory,
-      host: DSH_HOST,
-      port
-    });
+  // Re-ensure before every start, not only at application start: the profile is
+  // what dsh composes its plugin layers from, and an install that replaced or
+  // removed a managed plugin would otherwise only surface as a failed boot.
+  ensureProfilePlugins();
 
-    let dshOutput = "";
-    let resolveDshUrl: ((url: string) => void) | undefined;
-    const dshUrlReady = new Promise<string>((resolve) => {
-      resolveDshUrl = resolve;
-    });
-    dshProcess.stdout?.on("data", (chunk: Buffer) => {
-      appendLog("dsh", chunk);
-      dshOutput += chunk.toString();
-      const launchedUrl = extractDshUrl(dshOutput);
-      if (launchedUrl) {
-        dshUrl = launchedUrl;
-        resolveDshUrl?.(launchedUrl);
-      }
-    });
-    dshProcess.stderr?.on("data", (chunk: Buffer) =>
-      appendLog("dsh:error", chunk)
-    );
-    dshProcess.on("error", (error) => {
-      appendLog("process", Buffer.from(error.message));
-      void showProcessError(`无法启动 ${APP_NAME}`, error);
-    });
-    dshProcess.on("exit", (code, signal) => {
-      appendLog(
-        "process",
-        Buffer.from(
-          `Exited with code ${code ?? "null"}, signal ${signal ?? "none"}`
-        )
-      );
+  const port = await getAvailablePort(DSH_HOST);
+  // Quitting can land while this start was waiting for a port, and a child
+  // spawned after `before-quit` would outlive the application as an orphan
+  // holding a port.
+  if (isQuitting) {
+    return;
+  }
 
-      if (!isQuitting) {
-        const message = hasLoadedDsh
-          ? `dsh process exited (code ${code ?? "unknown"}).`
-          : `dsh process exited before startup (code ${code ?? "unknown"}).`;
-        void showProcessError(
-          hasLoadedDsh ? `${APP_NAME} 已停止` : `${APP_NAME} 启动失败`,
-          new Error(message)
-        );
-      }
-    });
+  dshUrl = `http://${DSH_HOST}:${port}`;
+  const child = startDshServer({
+    electronPath: process.execPath,
+    cwd: workingDirectory,
+    host: DSH_HOST,
+    port,
+    extraEnv: pluginManagerEnv
+  });
+  dshProcess = child;
 
-    await waitForDshStartup(dshProcess, dshUrl);
-    if (!dshUrl.includes("?token=")) {
-      await Promise.race([
-        dshUrlReady,
-        new Promise<never>((_, reject) =>
-          setTimeout(
-            () => reject(new Error("dsh did not report its authenticated Web URL.")),
-            5_000
-          )
-        )
-      ]);
+  let dshOutput = "";
+  let resolveDshUrl: ((url: string) => void) | undefined;
+  const dshUrlReady = new Promise<string>((resolve) => {
+    resolveDshUrl = resolve;
+  });
+  child.stdout?.on("data", (chunk: Buffer) => {
+    appendLog("dsh", chunk);
+    dshOutput += chunk.toString();
+    const launchedUrl = extractDshUrl(dshOutput);
+    if (launchedUrl) {
+      dshUrl = launchedUrl;
+      resolveDshUrl?.(launchedUrl);
     }
-    const window = mainWindow;
-    if (!window || window.isDestroyed()) {
+  });
+  child.stderr?.on("data", (chunk: Buffer) => appendLog("dsh:error", chunk));
+  child.on("error", (error) => {
+    if (child !== dshProcess) {
       return;
     }
-    await window.loadURL(dshUrl);
-    hasLoadedDsh = true;
+    appendLog("process", Buffer.from(error.message));
+    void showProcessError(`无法启动 ${APP_NAME}`, error);
+  });
+  child.on("exit", (code, signal) => {
+    if (child !== dshProcess) {
+      // A deliberate stop or a superseded start; neither is a failure.
+      return;
+    }
+    dshProcess = undefined;
+    appendLog(
+      "process",
+      Buffer.from(
+        `Exited with code ${code ?? "null"}, signal ${signal ?? "none"}`
+      )
+    );
+
+    if (isQuitting) {
+      return;
+    }
+
+    if (code === DSH_RESTART_EXIT_CODE) {
+      // The plugin manager asked for this: it answered the install request
+      // first, then exited so the new bundle can be composed at boot.
+      void restartDshService("已安装的插件需要重启服务");
+      return;
+    }
+
+    const message = hasLoadedDsh
+      ? `dsh process exited (code ${code ?? "unknown"}).`
+      : `dsh process exited before startup (code ${code ?? "unknown"}).`;
+    void showProcessError(
+      hasLoadedDsh ? `${APP_NAME} 已停止` : `${APP_NAME} 启动失败`,
+      new Error(message)
+    );
+  });
+
+  await waitForDshStartup(child, dshUrl);
+  if (!dshUrl.includes("?token=")) {
+    await Promise.race([
+      dshUrlReady,
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error("dsh did not report its authenticated Web URL.")),
+          5_000
+        )
+      )
+    ]);
+  }
+  if (generation !== dshGeneration) {
+    return;
+  }
+
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) {
+    return;
+  }
+
+  await window.loadURL(dshUrl);
+  hasLoadedDsh = true;
+}
+
+/**
+ * Restart the service so an installed or removed plugin takes effect.
+ *
+ * The window returns to the loading page first: the old page's origin dies with
+ * the child, and a renderer parked on a dead origin reads as a crash.
+ */
+async function restartDshService(reason: string): Promise<void> {
+  if (isRestartingDsh || isQuitting) {
+    return;
+  }
+
+  isRestartingDsh = true;
+  appendLog("app", Buffer.from(`restarting the dsh service: ${reason}`));
+  try {
+    stopDshServer();
+    await showLoadingPage(`正在重启 ${APP_NAME}…`);
+    await startDshService();
+  } catch (error) {
+    appendLog("app", Buffer.from(`restart failed: ${errorMessage(error)}`));
+    stopDshServer();
+    if (!isQuitting) {
+      await showProcessError(`${APP_NAME} 启动失败`, error);
+    }
+  } finally {
+    isRestartingDsh = false;
+  }
+}
+
+async function startApplication(): Promise<void> {
+  createTray();
+  await createMainWindow();
+  await updateLoadingStatus(`正在启动 ${APP_NAME}…`);
+  // The profile and the plugin-manager environment are prepared inside
+  // `startDshService`, so a restart after an install gets them again.
+  resolvePluginManagerEnv();
+
+  try {
+    await startDshService();
   } catch (error) {
     stopDshServer();
-    await showProcessError(`${APP_NAME} 启动失败`, error);
+    if (!isQuitting) {
+      await showProcessError(`${APP_NAME} 启动失败`, error);
+    }
   }
 }
 

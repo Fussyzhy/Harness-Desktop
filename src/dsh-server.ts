@@ -16,6 +16,12 @@ interface StartDshServerOptions {
   cwd: string;
   host: string;
   port: number;
+  /**
+   * Environment for the child, merged over this process's own. The desktop
+   * shell uses it to hand the bundled plugin manager the pnpm shim and the
+   * paths it needs to install plugins.
+   */
+  extraEnv?: NodeJS.ProcessEnv;
 }
 
 interface WaitForHttpOptions {
@@ -90,7 +96,8 @@ export function startDshServer({
   electronPath,
   cwd,
   host,
-  port
+  port,
+  extraEnv
 }: StartDshServerOptions): ChildProcess {
   const cliPath = resolveDshCliPath();
   const args = buildDshArguments({ cliPath, host, port });
@@ -100,7 +107,8 @@ export function startDshServer({
     env: {
       ...process.env,
       ELECTRON_RUN_AS_NODE: "1",
-      NO_COLOR: "1"
+      NO_COLOR: "1",
+      ...extraEnv
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true

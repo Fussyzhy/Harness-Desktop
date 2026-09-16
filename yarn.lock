@@ -5024,6 +5024,11 @@ plist@^3.0.5, plist@^3.1.0:
     base64-js "^1.5.1"
     xmlbuilder "^15.1.1"
 
+pnpm@10.4.0:
+  version "10.4.0"
+  resolved "https://registry.npmmirror.com/pnpm/-/pnpm-10.4.0.tgz#896bdea7e92d0a37e53829d6ec47871e5c750419"
+  integrity sha512-a4SdB4fZf49OHwOpuP+PA4554VPW8RrlOa58Q1/555bfaoYsmRUCaVx/no+siur8GsWo2rR+NhSNGDgy2IbdUg==
+
 powershell-utils@^0.1.0:
   version "0.1.0"
   resolved "https://registry.npmmirror.com/powershell-utils/-/powershell-utils-0.1.0.tgz#5a42c9a824fb4f2f251ccb41aaae73314f5d6ac2"
