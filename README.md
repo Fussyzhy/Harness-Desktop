@@ -33,7 +33,7 @@ Harness Desktop 是一个基于 TypeScript 和 Electron 的 DeepSeek Harness 桌
 - **开箱即用**：安装包自带 Electron Node.js 运行时、dsh 和全部生产依赖
 - **服务托管**：随桌面应用自动启动和关闭本地 dsh 服务
 - **端口隔离**：自动选择 `127.0.0.1` 上的空闲端口，避免实例冲突
-- **桌面体验**：自定义标题栏、窗口拖拽、任务栏名称和统一应用图标
+- **桌面体验**：自定义标题栏为系统窗口按钮预留独立条带、窗口拖拽、任务栏名称和统一应用图标
 - **托盘驻留**：关闭窗口后保持后台运行，可从托盘重新打开或完全退出
 - **安全导航**：应用外链接交给系统默认浏览器打开
 - **错误诊断**：启动失败或服务意外退出时直接展示相关日志
@@ -72,6 +72,7 @@ npm start
 | `yarn test` | 运行 dsh 服务启动相关测试 |
 | `yarn package:dir` | 生成用于快速验证的未安装应用目录 |
 | `yarn package:win` | 生成 Windows x64 NSIS 安装包 |
+| `yarn patch:app` | 把当前 `dist/` 写进已安装客户端的 `app.asar`，免去重新打包安装 |
 
 ## 构建安装包
 
@@ -102,6 +103,50 @@ yarn package:win
 
 > 当前安装包尚未配置代码签名，Windows SmartScreen 可能显示“未知发布者”。
 
+## 只更新已安装的客户端
+
+改了 `src/` 之后不需要重新打包安装：`app.asar` 里只有 `dist/`、`src/loading.html`、
+`build/icon.png` 这几个小文件，生产依赖全部在旁边的 `app.asar.unpacked` 中。因此可以只重写这
+个约 5 MB 的归档：
+
+```powershell
+npm run build        # 编译 TypeScript
+yarn patch:app       # 或 npm run patch:app
+```
+
+脚本会在替换前把新归档完整解回来比对每个条目，写入时先备份再改名，失败会自动还原。
+**必须先完全退出 Harness Desktop（含托盘图标）**：应用运行时 `app.asar` 被占用，脚本会直接
+报错并且不做任何修改。
+
+`package.json` 不在同步范围内——electron-builder 打包前会裁剪它（去掉 `scripts`、
+`devDependencies`），仓库里的副本不能直接顶替。所以版本号变更仍然要重新走 `yarn package:win`。
+
+## 依赖补丁
+
+dsh 跑在 Electron 的 Node 运行时里（`ELECTRON_RUN_AS_NODE=1`），这条事实会顺着子进程环境一路
+传下去，并让少数场景失效。`scripts/patch-dsh-*.cjs` 在 `postinstall` / `prebuild` 时逐条修正
+dsh 依赖里对应的位置，每个补丁都锁定 dsh 版本，且在当前版本上先校验原始代码再替换：
+
+| 补丁 | 修正的问题 |
+| --- | --- |
+| `patch-dsh-directory-picker.cjs` | 目录选择器在 Windows 上读取路径时崩溃 |
+| `patch-dsh-settings-open.cjs` | 打开设置文档时异常被吞掉、按钮卡住 |
+| `patch-dsh-open-in-app.cjs` | “在本地打开”无法启动 VS Code 等 Electron 应用 |
+
+最后一个补丁修的是：被启动的桌面程序从 dsh 继承了 `ELECTRON_RUN_AS_NODE=1`，于是 VS Code、
+VS Code Insiders、Cursor、Windsurf 这些 Electron 程序被当成 Node 进程启动，几十毫秒内就带着
+`node:internal/modules/cjs/loader` 错误退出，界面显示“打开失败”。补丁只从**被启动的桌面程序**
+继承的环境里去掉这个变量（资源管理器、Git Bash 不受影响，GitHub Desktop 自己声明的仍保留）。
+
+已安装的客户端也可以就地修好，不必重新打包——它的依赖就在 `app.asar.unpacked` 里：
+
+```powershell
+node scripts/patch-dsh-open-in-app.cjs --modules "$env:LOCALAPPDATA\Programs\Harness Desktop\resources\app.asar.unpacked\node_modules"
+```
+
+> 补丁改的是 node_modules，`yarn patch:app` 不覆盖它；重新打包安装后无需再执行。
+> 运行中的应用要重启（托盘图标 → 关闭，再打开）才会加载改过的插件代码。
+
 ## 工作原理
 
 ```text
@@ -113,6 +158,10 @@ Harness Desktop
 
 - Electron 主进程和服务管理代码均使用 TypeScript。
 - 开发命令会先将 `src/*.ts` 编译到 `dist/`，再启动 Electron。
+- 窗口使用 `titleBarStyle: "hidden"` 加 `titleBarOverlay`：Windows 会把最小化/最大化/关闭
+  按钮直接画在页面上，所以主进程在每次加载完成后注入样式，用 `env(titlebar-area-*)` 预留出
+  与该条带等高的顶部空间，并让这条带可拖拽。`box-sizing: border-box` 把内边距折进页面原有的
+  `height: 100%`，使 Web UI 的实际可用高度正好等于窗口高度减去条带，不会溢出或出现滚动条。
 - dsh 通过 Electron 内置 Node.js 运行，并使用 `--expose-internals` 满足 HMR 服务要求。
 - 生产依赖会放入 `app.asar.unpacked`，保证动态插件和原生模块可被子进程加载。
 - 项目在顶层固定 dsh Web profile 所需的 peer dependencies，以兼容 Yarn Classic。
@@ -194,6 +243,7 @@ profile 位于 `$DSH_HOME`（默认 `~/.dsh`）下的 `profiles/web/`，不在�
 | `src/dsh-server.ts` | dsh 进程启动、端口选择与就绪检测 |
 | `src/dsh-profile.ts` | 内置插件写入 dsh `web` profile |
 | `src/loading.html` | 本地服务启动和错误状态页 |
+| `scripts/` | 依赖补丁和把构建写进已安装客户端的工具 |
 | `test/` | dsh 服务、profile 注入和构建补丁测试 |
 | `build/icon.png` | 应用、Loading、安装器和快捷方式图标 |
 | `electron-builder.yml` | Windows 安装包配置 |

@@ -16,7 +16,19 @@ const MAX_LOG_LINES = 80;
 const APP_ICON_PATH = path.join(app.getAppPath(), "build", "icon.png");
 const LOADING_PAGE_PATH = path.join(app.getAppPath(), "src", "loading.html");
 const LOADING_PAGE_URL = pathToFileURL(LOADING_PAGE_PATH).href;
-const WINDOW_DRAG_REGION_CSS = `
+/**
+ * Window chrome for `titleBarStyle: "hidden"` plus a `titleBarOverlay`: Windows
+ * paints the native minimize/maximize/close buttons on top of the page, so the
+ * strip they occupy must stay empty or they cover the app's own header.
+ *
+ * `body` reserves that strip and the page keeps its own layout because
+ * `box-sizing: border-box` folds the padding into the existing
+ * `html, body { height: 100% }`, leaving `#root` exactly the height of the
+ * remaining content area instead of overflowing the window. The pseudo element
+ * keeps the reserved strip draggable, which is the only title bar the window
+ * has.
+ */
+const WINDOW_CHROME_CSS = `
   html::before {
     content: "";
     position: fixed;
@@ -26,6 +38,13 @@ const WINDOW_DRAG_REGION_CSS = `
     height: env(titlebar-area-height, 32px);
     z-index: 2147483647;
     -webkit-app-region: drag;
+  }
+
+  body {
+    box-sizing: border-box;
+    padding-top: calc(
+      env(titlebar-area-y, 0px) + env(titlebar-area-height, 32px)
+    );
   }
 `;
 
@@ -175,10 +194,10 @@ function configureNavigation(window: BrowserWindow): void {
   });
 }
 
-function configureWindowDragRegion(window: BrowserWindow): void {
+function configureWindowChrome(window: BrowserWindow): void {
   window.webContents.on("did-finish-load", () => {
-    void window.webContents.insertCSS(WINDOW_DRAG_REGION_CSS).catch((error) => {
-      console.error("Failed to install the window drag region.", error);
+    void window.webContents.insertCSS(WINDOW_CHROME_CSS).catch((error) => {
+      console.error("Failed to install the window chrome stylesheet.", error);
     });
   });
 }
@@ -248,7 +267,7 @@ async function createMainWindow(): Promise<void> {
 
   mainWindow = window;
   configureNavigation(window);
-  configureWindowDragRegion(window);
+  configureWindowChrome(window);
   window.on("page-title-updated", (event) => {
     event.preventDefault();
     window.setTitle(APP_NAME);
