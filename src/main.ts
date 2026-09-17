@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, nativeImage, shell, Tray } from "electron";
+import { app, BrowserWindow, dialog, Menu, nativeImage, shell, Tray } from "electron";
 import type { ChildProcess } from "node:child_process";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -8,7 +8,14 @@ import {
   startDshServer,
   waitForDshStartup
 } from "./dsh-server.js";
-import { BUNDLED_LOCAL_PROFILE_PLUGINS, ensureWebProfilePlugins } from "./dsh-profile.js";
+import {
+  BUNDLED_LOCAL_PROFILE_PLUGINS,
+  ensureWebProfilePlugins,
+  quarantineProfileBundles,
+  readQuarantine,
+  restoreQuarantinedBundles,
+  thirdPartyProfileBundles
+} from "./dsh-profile.js";
 import {
   DSH_RESTART_EXIT_CODE,
   preparePluginManagerEnvironment
@@ -18,6 +25,37 @@ import { PetOverlayController } from "./pet-overlay.js";
 const DSH_HOST = "127.0.0.1";
 const APP_NAME = "Harness Desktop";
 const MAX_LOG_LINES = 80;
+/**
+ * How many plugin bundles one failing start chain may disable before the
+ * failure is treated as this application's own.
+ *
+ * Each attempt costs one boot, and a failure that survives three of them is far
+ * more likely to be this application's than the fourth plugin's. The budget is
+ * per chain: a start that reaches the UI ends the chain and refills it, so a
+ * later failure is not judged by how many plugins an earlier one ruled out.
+ */
+const MAX_QUARANTINE_ATTEMPTS = 3;
+/**
+ * How long a reachable dsh service has to report its authenticated URL.
+ *
+ * A healthy boot prints the URL the moment its port answers, so this ceiling is
+ * never reached by one. A boot whose plugin layer stack cannot be composed
+ * binds the port first and only then fails, and without this it would sit on the
+ * loading page until {@link waitForDshStartup} — which has already accepted the
+ * HTTP answer — ran out of its own, much longer, budget.
+ */
+const DSH_URL_GRACE_MS = 15_000;
+/**
+ * `--safe-mode` (or `HARNESS_DESKTOP_SAFE_MODE=1`) starts with every third-party
+ * plugin bundle disabled — the escape hatch from a profile that cannot boot.
+ * `--restore-plugins` puts back everything an earlier recovery disabled.
+ */
+const SAFE_MODE_REQUESTED =
+  process.argv.includes("--safe-mode") ||
+  process.env.HARNESS_DESKTOP_SAFE_MODE === "1";
+const RESTORE_PLUGINS_REQUESTED =
+  process.argv.includes("--restore-plugins") ||
+  process.env.HARNESS_DESKTOP_RESTORE_PLUGINS === "1";
 const APP_ICON_PATH = path.join(app.getAppPath(), "build", "icon.png");
 const LOADING_PAGE_PATH = path.join(app.getAppPath(), "src", "loading.html");
 const LOADING_PAGE_URL = pathToFileURL(LOADING_PAGE_PATH).href;
@@ -90,7 +128,6 @@ let tray: Tray | undefined;
 let dshProcess: ChildProcess | undefined;
 let dshUrl: string | undefined;
 let isQuitting = false;
-let hasLoadedDsh = false;
 const recentLogs: string[] = [];
 /**
  * Bumped whenever the service is stopped or replaced. A start that is still
@@ -101,6 +138,20 @@ let dshGeneration = 0;
 /** Prepared once after `ready`; `undefined` until then. */
 let pluginManagerEnv: Record<string, string> | undefined;
 let isRestartingDsh = false;
+/** Whether this launch starts with third-party plugin bundles disabled. */
+let safeMode = SAFE_MODE_REQUESTED;
+let safeModeApplied = false;
+/** Plugin bundles this launch disabled to get dsh up, and how many starts it took. */
+let quarantinedThisRun: string[] = [];
+/** Third-party bundles safe mode took out for this launch. */
+let safeModeDisabledThisRun: string[] = [];
+let quarantineAttempts = 0;
+/**
+ * Children whose failure the exit handler has taken over: the start that spawned
+ * one of them must return quietly instead of racing the recovery with an error
+ * page.
+ */
+const claimedFailures = new WeakSet<ChildProcess>();
 /** The floating desktop pet; `undefined` until the application starts. */
 let petOverlay: PetOverlayController | undefined;
 /**
@@ -155,12 +206,246 @@ function ensureProfilePlugins(): void {
     if (result.bundles.length > 0) {
       appendLog("profile", Buffer.from(`bundles: ${result.bundles.join(", ")}`));
     }
+
+    const quarantined = readQuarantine();
+    if (quarantined !== undefined && quarantined.disabled.length > 0) {
+      appendLog(
+        "profile",
+        Buffer.from(
+          `disabled after an earlier start (${quarantined.reason}): ${quarantined.disabled.join(", ")}`
+        )
+      );
+    }
   } catch (error) {
     appendLog(
       "profile",
       Buffer.from(`web profile plugin setup failed: ${errorMessage(error)}`)
     );
   }
+}
+
+/** The profile's third-party plugin bundles, or none when it cannot be read. */
+function thirdPartyBundles(): string[] {
+  try {
+    return thirdPartyProfileBundles({
+      localAdditions: BUNDLED_LOCAL_PROFILE_PLUGINS
+    });
+  } catch (error) {
+    appendLog(
+      "profile",
+      Buffer.from(`could not read the profile's plugin bundles: ${errorMessage(error)}`)
+    );
+    return [];
+  }
+}
+
+/**
+ * Disable every third-party plugin bundle for this launch.
+ *
+ * A start that fails for a reason no single plugin explains still has an escape
+ * hatch: dsh composes nothing but its own layers, which is enough to reach the
+ * plugin manager and disable or remove whatever cannot be mounted.
+ */
+function applySafeMode(): void {
+  if (!safeMode || safeModeApplied) {
+    return;
+  }
+
+  safeModeApplied = true;
+  const names = thirdPartyBundles();
+  if (names.length === 0) {
+    return;
+  }
+
+  const record = quarantineProfileBundles({
+    names,
+    reason: "safe-mode",
+    localAdditions: BUNDLED_LOCAL_PROFILE_PLUGINS
+  });
+  if (record !== undefined) {
+    // `names` is exactly what this call removed: they were read from the same
+    // manifest moments ago, and safe mode removes every one of them.
+    safeModeDisabledThisRun = names;
+  }
+  appendLog("profile", Buffer.from(`safe mode: disabled ${names.join(", ")}`));
+}
+
+/**
+ * Take one third-party bundle out of the profile's layer stack and start again.
+ *
+ * dsh reports a plugin it cannot compose or import by failing to boot at all,
+ * and the profile's layer list is the only lever this application has. Dropping
+ * one bundle per attempt is what turns "dsh does not start" into "this plugin
+ * does not start it" without guessing which one.
+ *
+ * @returns whether a retry was started.
+ */
+function retryWithoutOnePlugin(): boolean {
+  if (isQuitting || quarantineAttempts >= MAX_QUARANTINE_ATTEMPTS) {
+    return false;
+  }
+
+  const candidate = thirdPartyBundles()
+    .filter((name) => !quarantinedThisRun.includes(name))
+    .pop();
+  if (candidate === undefined) {
+    // Every candidate was already disabled and dsh still failed, so no plugin
+    // explains this launch: leave the profile as the user had it.
+    restoreRecoveryAttempts();
+    return false;
+  }
+
+  const record = quarantineProfileBundles({
+    names: [candidate],
+    reason: "startup-failure",
+    localAdditions: BUNDLED_LOCAL_PROFILE_PLUGINS
+  });
+  if (record === undefined) {
+    return false;
+  }
+
+  quarantinedThisRun.push(candidate);
+  quarantineAttempts += 1;
+  appendLog(
+    "profile",
+    Buffer.from(
+      `dsh failed before startup; disabled ${candidate} and retrying (${quarantineAttempts}/${MAX_QUARANTINE_ATTEMPTS})`
+    )
+  );
+  void runDshRestart(`插件 ${candidate} 无法随当前 dsh 启动，已临时停用`);
+  return true;
+}
+
+/**
+ * Undo this launch's recoveries, for a failure no plugin candidate explains.
+ *
+ * Only the bundles this launch disabled are handed back: the record can also
+ * hold removals an earlier launch made and reported, and those describe a
+ * failure this launch never saw.
+ */
+function restoreRecoveryAttempts(): void {
+  if (quarantinedThisRun.length === 0) {
+    return;
+  }
+
+  const restored = restoreQuarantinedBundles({ names: quarantinedThisRun });
+  appendLog(
+    "profile",
+    Buffer.from(
+      `dsh failed with every candidate plugin disabled; restored ${restored.join(", ") || "nothing"}`
+    )
+  );
+  quarantinedThisRun = [];
+  quarantineAttempts = 0;
+}
+
+/**
+ * Tell the user which plugins a start left behind.
+ *
+ * The removals are persisted, so silence would look like the plugins were
+ * removed by something else. Reinstalling is the path back — `dsh plugin add`
+ * puts a dependency's bundle back into the layer list — and it is also the
+ * request whose declared peer ranges this application now restores.
+ */
+async function reportDisabledPlugins(): Promise<void> {
+  const incompatible = [...quarantinedThisRun];
+  const safeModeNames = [...safeModeDisabledThisRun];
+  if (incompatible.length === 0 && safeModeNames.length === 0) {
+    return;
+  }
+
+  quarantinedThisRun = [];
+  safeModeDisabledThisRun = [];
+  appendLog(
+    "profile",
+    Buffer.from(
+      [
+        incompatible.length > 0 ? `disabled to start: ${incompatible.join(", ")}` : "",
+        safeModeNames.length > 0 ? `safe mode disabled: ${safeModeNames.join(", ")}` : ""
+      ]
+        .filter(Boolean)
+        .join("; ")
+    )
+  );
+
+  const detail: string[] = [];
+  if (incompatible.length > 0) {
+    detail.push(
+      "以下插件无法随当前 dsh 启动，已从插件层里移除：",
+      ...incompatible.map((name) => `  ${name}`),
+      ""
+    );
+  }
+  if (safeModeNames.length > 0) {
+    detail.push(
+      "本次以安全模式启动，以下插件层已全部停用：",
+      ...safeModeNames.map((name) => `  ${name}`),
+      ""
+    );
+  }
+  detail.push(
+    "重新安装插件即可再次尝试（安装时会自动补齐它声明的兼容依赖），"
+      + "也可以用 --restore-plugins 一次恢复全部。"
+  );
+
+  const options = {
+    type: "warning" as const,
+    title: APP_NAME,
+    message:
+      incompatible.length > 0 ? "已停用无法随当前 dsh 启动的插件" : "已以安全模式启动",
+    detail: detail.join("\n")
+  };
+
+  const window = mainWindow;
+  if (window && !window.isDestroyed()) {
+    await dialog.showMessageBox(window, options);
+  } else {
+    await dialog.showMessageBox(options);
+  }
+}
+
+/**
+ * Report a start no plugin candidate explains, and offer the safe-mode escape.
+ *
+ * The error page keeps the full log; the dialog is what makes the next step
+ * obvious to someone who cannot read a stack trace.
+ */
+async function reportStartupFailure(code: number | null): Promise<void> {
+  await showProcessError(
+    `${APP_NAME} 启动失败`,
+    new Error(`dsh process exited before startup (code ${code ?? "unknown"}).`)
+  );
+
+  if (isQuitting) {
+    return;
+  }
+
+  const window = mainWindow;
+  const options = {
+    type: "error" as const,
+    title: APP_NAME,
+    message: `${APP_NAME} 无法启动`,
+    detail: [
+      ...recentLogs.slice(-12),
+      "",
+      "可以尝试以安全模式启动：本次启动会禁用全部第三方插件，之后能在插件管理器里逐个恢复。"
+    ].join("\n"),
+    buttons: ["以安全模式启动", "退出"],
+    defaultId: 0,
+    cancelId: 1
+  };
+  const { response } =
+    window && !window.isDestroyed()
+      ? await dialog.showMessageBox(window, options)
+      : await dialog.showMessageBox(options);
+
+  if (response !== 0 || isQuitting) {
+    return;
+  }
+
+  safeMode = true;
+  safeModeApplied = false;
+  void runDshRestart("以安全模式启动");
 }
 
 /**
@@ -480,6 +765,7 @@ async function startDshService(): Promise<void> {
   // what dsh composes its plugin layers from, and an install that replaced or
   // removed a managed plugin would otherwise only surface as a failed boot.
   ensureProfilePlugins();
+  applySafeMode();
 
   const port = await getAvailablePort(DSH_HOST);
   // Quitting can land while this start was waiting for a port, and a child
@@ -499,6 +785,11 @@ async function startDshService(): Promise<void> {
   });
   dshProcess = child;
 
+  // Per start, not per process: a plugin install restarts the service in the
+  // same process, and the failure the recovery exists for is the *restart*
+  // never reaching the UI. A flag that survives the restart would classify it
+  // as a crash after startup and skip the recovery entirely.
+  let uiLoaded = false;
   let dshOutput = "";
   let resolveDshUrl: ((url: string) => void) | undefined;
   const dshUrlReady = new Promise<string>((resolve) => {
@@ -527,6 +818,9 @@ async function startDshService(): Promise<void> {
       return;
     }
     dshProcess = undefined;
+    // The exit handler owns this failure from here on: the start that spawned
+    // this child must not also report it while a recovery is starting again.
+    claimedFailures.add(child);
     appendLog(
       "process",
       Buffer.from(
@@ -545,26 +839,61 @@ async function startDshService(): Promise<void> {
       return;
     }
 
-    const message = hasLoadedDsh
-      ? `dsh process exited (code ${code ?? "unknown"}).`
-      : `dsh process exited before startup (code ${code ?? "unknown"}).`;
-    void showProcessError(
-      hasLoadedDsh ? `${APP_NAME} 已停止` : `${APP_NAME} 启动失败`,
-      new Error(message)
-    );
+    if (!uiLoaded) {
+      // A failure before this start reported its URL is the shape a plugin that
+      // cannot be composed or imported has; a crash after the UI loaded is not.
+      if (retryWithoutOnePlugin()) {
+        return;
+      }
+      void reportStartupFailure(code);
+      return;
+    }
+
+    const message = `dsh process exited (code ${code ?? "unknown"}).`;
+    void showProcessError(`${APP_NAME} 已停止`, new Error(message));
   });
 
-  await waitForDshStartup(child, dshUrl);
+  try {
+    await waitForDshStartup(child, dshUrl);
+  } catch (error) {
+    // A claimed failure already has an owner: either a plugin restart, or a
+    // recovery that is starting the service again. Reporting it here too would
+    // race that new start with an error page.
+    if (claimedFailures.has(child)) {
+      return;
+    }
+    throw error;
+  }
   if (!dshUrl.includes("?token=")) {
-    await Promise.race([
-      dshUrlReady,
-      new Promise<never>((_, reject) =>
-        setTimeout(
-          () => reject(new Error("dsh did not report its authenticated Web URL.")),
-          5_000
+    try {
+      await Promise.race([
+        dshUrlReady,
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("dsh did not report its authenticated Web URL.")),
+            DSH_URL_GRACE_MS
+          )
         )
-      )
-    ]);
+      ]);
+    } catch (error) {
+      // A reachable service that never reports its URL is the same failure as a
+      // start that exits before startup, only reported later: the plugin layer
+      // stack bound the port and then failed. It has to reach the recovery the
+      // exit path runs, because the child is still alive here — nothing else
+      // will notice its failure, and this used to end at an error page with the
+      // offending plugin still in the profile.
+      if (claimedFailures.has(child) || generation !== dshGeneration || isQuitting) {
+        // The exit handler or a newer start owns this window already.
+        return;
+      }
+
+      stopDshServer();
+      if (retryWithoutOnePlugin()) {
+        return;
+      }
+
+      throw error;
+    }
   }
   if (generation !== dshGeneration) {
     return;
@@ -576,7 +905,11 @@ async function startDshService(): Promise<void> {
   }
 
   await window.loadURL(dshUrl);
-  hasLoadedDsh = true;
+  uiLoaded = true;
+  // This chain ended: a later failure gets the full recovery budget again.
+  quarantineAttempts = 0;
+  // The UI is up: say which plugins this start had to leave behind.
+  void reportDisabledPlugins();
   // Point the floating pet at this service. A restart takes a new port, so this
   // also reloads the overlay page onto the new origin.
   void petOverlay?.setDshUrl(dshUrl);
@@ -587,6 +920,11 @@ async function startDshService(): Promise<void> {
  *
  * The window returns to the loading page first: the old page's origin dies with
  * the child, and a renderer parked on a dead origin reads as a crash.
+ *
+ * This guard covers this caller alone. A recovery retry restarts through
+ * {@link runDshRestart} directly, because the attempt it recovers from *is* the
+ * restart that failed — a guard shared with it would stop the second plugin of
+ * a failed start from ever being ruled out.
  */
 async function restartDshService(reason: string): Promise<void> {
   if (isRestartingDsh || isQuitting) {
@@ -594,6 +932,15 @@ async function restartDshService(reason: string): Promise<void> {
   }
 
   isRestartingDsh = true;
+  try {
+    await runDshRestart(reason);
+  } finally {
+    isRestartingDsh = false;
+  }
+}
+
+/** Stop, show the loading page, and start again: every restart path shares this. */
+async function runDshRestart(reason: string): Promise<void> {
   appendLog("app", Buffer.from(`restarting the dsh service: ${reason}`));
   try {
     stopDshServer();
@@ -605,8 +952,6 @@ async function restartDshService(reason: string): Promise<void> {
     if (!isQuitting) {
       await showProcessError(`${APP_NAME} 启动失败`, error);
     }
-  } finally {
-    isRestartingDsh = false;
   }
 }
 
@@ -629,6 +974,23 @@ async function startApplication(): Promise<void> {
   // The profile and the plugin-manager environment are prepared inside
   // `startDshService`, so a restart after an install gets them again.
   resolvePluginManagerEnv();
+
+  if (RESTORE_PLUGINS_REQUESTED) {
+    try {
+      const restored = restoreQuarantinedBundles();
+      appendLog(
+        "profile",
+        Buffer.from(
+          `restored plugin bundles: ${restored.join(", ") || "(none were disabled)"}`
+        )
+      );
+    } catch (error) {
+      appendLog(
+        "profile",
+        Buffer.from(`restoring plugin bundles failed: ${errorMessage(error)}`)
+      );
+    }
+  }
 
   try {
     await startDshService();

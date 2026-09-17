@@ -339,25 +339,46 @@ peer 依赖的坑就靠这个绕过。每个规格单独校验：不能以 `-` �
   提示是 `Ignored build scripts: <包名>. Run "pnpm approve-builds" …`，放行键是
   `pnpm-workspace.yaml` 里的 `onlyBuiltDependencies`（dsh 自己的提示文案写的是 `allowBuilds`，那是
   更新版 pnpm 的键名，这个版本不认）。把提示里点名的包写进去再重试即可。
-- **peer 依赖指向未发布的包时，注册表安装会失败**：插件只要声明 peer `@deepseek-ai/dsh-tools`（写 `*`
-  的最常见）就会撞上这个坑——`dsh-tools` 的 `latest` dist-tag 至今指向最老的 `0.0.1-rc.1`，而那一支的
-  peer 里含有**从未发布**的 `@deepseek-ai/dsh-type-meta`（`dsh-session@0.0.1-rc.1`、
-  `dsh-agent@0.0.1-rc.1` 都声明了它），于是 pnpm 报 `ERR_PNPM_FETCH_404 … dsh-type-meta` 并放弃整次
-  安装。这与 profile 和本应用无关：空目录里 `pnpm add @deepseek-ai/dsh-tools@0.0.1-rc.1` 同样复现；
-  而 `dsh-tools@0.1.6-alpha.1`（应用自带的那版）的 peer 是已发布的 `^0.1.6-alpha.1` 家族，一路干净。
+- **peer 依赖不会由 pnpm 去注册表补装**：过去插件只要声明 peer（写 `*` 的最常见），pnpm 就会按
+  `latest` dist-tag 把缺失的 peer 装进 profile，而 dsh 框架包的 `latest` 至今指向最老的
+  `0.0.1-rc.1`：那一支的 peer 里含有**从未发布**的 `@deepseek-ai/dsh-type-meta`
+  （`dsh-session@0.0.1-rc.1`、`dsh-agent@0.0.1-rc.1` 都声明了它），于是 pnpm 报
+  `ERR_PNPM_FETCH_404 … dsh-type-meta`（换成任何一个被改名或下架的包同样如此）并放弃整次安装——
+  插件根本没机会被装进去。这与 profile 的内容无关：空目录里
+  `pnpm add @deepseek-ai/dsh-tools@0.0.1-rc.1` 同样复现，而 `dsh-tools@0.1.6-alpha.1`（应用自带的
+  那版）的 peer 是已发布的 `^0.1.6-alpha.1` 家族，一路干净。
 
-  修法是把这个 peer 指名道姓地一起写进输入框（两个规格，空格或逗号分隔），二选一：
+  本应用因此在两个层面关掉了 peer 自动补装，这类安装不会再失败：profile 里写入 `.npmrc`
+  （`auto-install-peers=false`——dsh 模板写在 `pnpm-workspace.yaml` 里的 `autoInstallPeers`，这个版本
+  的 pnpm 不读，它只认 `.npmrc` 与 `npm_config_*`），再给 dsh 子进程加上
+  `npm_config_auto_install_peers=false`（覆盖你自己写过 `<profile>/.npmrc` 的情况，见下面的"镜像源"）。
+  缺的 peer 只以警告列出，由运行中的应用提供：`$DSH_HOME/profiles/node_modules` 镜像了应用自己的
+  依赖闭包，插件宿主半 import 的框架包（`@deepseek-ai/cordis`、`dsh-tools`、`dsh-settings` …）
+  正是从这里解析，版本与应用一致。但这只保证**解析得到**，不保证**接口还在**：插件若 import 了应用
+  这一线已经删掉的导出（本机案例：`@deepseek-ai/dsh-settings` 早先的 `settingsNamespace`），
+  组合或链接阶段就会失败，表现是 dsh 根本起不来，而不是少一个功能。下一条的安装期回填与
+  [启动自愈与安全模式](#启动自愈与安全模式)就是为这一类插件准备的。
+- **不兼容的 peer 由安装者按插件声明的范围回填**：安装成功后，插件管理插件会重读该插件的
+  `peerDependencies`，逐个解析实际落到的版本；凡是"缺失"或"不满足声明范围"的，就用**插件自己声明的
+  范围**再补一次 `pnpm add`（例如 `dsh-live2d-pets` 声明的 `@deepseek-ai/dsh-settings@^0.1.0-rc.6`）。
+  于是解析到的是插件作者验证过的那一支，而不是注册表上的 `latest`。范围写 `*` 或空的一律跳过
+  （`*` 就是 `latest`，正是上一条坑的来源），声明为 `optional` 的 peer 不补，超出支持语法的 range
+  （例如 `1.2.3 - 2.0.0`）也不补——宁可让它按原样失败，也不按猜测去装。补装了哪些规格会打印在卡片
+  输出里。判断只针对插件宿主半真正会 import 的框架包，且只在这一步失败时才有影响。
+- **仍然需要手写规格的情形**：插件在**宿主半**（Node 侧）import 了一个只在浏览器侧存在的包
+  （例如 `react`）——这类包在 `$DSH_HOME/profiles/node_modules` 里是空链接，它们由浏览器半的模块表
+  提供、不在 Node 侧解析；或者你要用 `link:` 指到应用自带的那一份。写法仍是同一行给多个规格
+  （空格或逗号分隔）：
 
   ```text
-  @hellosz/dsh-pets  @deepseek-ai/dsh-tools@0.1.6-alpha.1
+  @hellosz/dsh-pets  react@<该插件 peer 要求的版本>
   @hellosz/dsh-pets  @deepseek-ai/dsh-tools@link:<应用目录>/node_modules/@deepseek-ai/dsh-tools
   ```
 
-  第一行更省事（版本号取本应用 `package.json` 里 `@deepseek-ai/dsh-tools` 的值，目前是
-  `0.1.6-alpha.1`）；第二行保证永远与应用内置的那份同版本、且不额外下载，代价是 profile 里记下一个
+  第二行的 `link:` 形式保证永远与应用内置的那份同版本、且不额外下载，代价是 profile 里记下一个
   本机绝对路径（应用换了安装目录就要重新装一次）。命令行等价写法是
   `dsh plugin --profile web add --workspace-root <上面两个规格> --store-dir <DSH_HOME>/.pnpm-store`。
-  `@deepseek-ai/dsh-tools` 不声明 `dsh.bundle`，只会作为普通依赖落进 profile 的 `dependencies`
+  额外装的包若不声明 `dsh.bundle`，只会作为普通依赖落进 profile 的 `dependencies`
   （dsh 会打印一条相应提示），不影响插件层。
 - **镜像源**：pnpm 读它自己的配置，在 `<profile>/.npmrc` 或 `~/.npmrc` 里写 `registry=`
   即可（例如 `https://registry.npmmirror.com`）。注意 `yarn dev` 起的环境里，yarn 会把自己的
@@ -367,6 +388,38 @@ peer 依赖的坑就靠这个绕过。每个规格单独校验：不能以 `-` �
 
 profile 位于 `$DSH_HOME`（默认 `~/.dsh`）下的 `profiles/web/`，不在安装目录里，
 因此应用升级或重装都不会丢失用户自己装的插件。
+
+### 启动自愈与安全模式
+
+不兼容的插件不一定只表现为"少一个功能"：dsh 启动时要组合 `dsh.profile.bundles` 里的每一层，任何一层
+解析不了或 import 不到，整个启动就失败——现象就是"装之前好好的，装完这个插件应用打不开了"（本机
+案例：`dsh-live2d-pets@0.2.2` 的宿主半 import 了 `@deepseek-ai/dsh-settings` 已删掉的导出，ESM
+链接期直接报错，dsh 在报出地址之前就退出）。桌面外壳对此有三条退路：
+
+1. **启动自愈**：启动在 dsh 报出地址**之前**失败时，外壳会把最后一层第三方插件从
+   `dsh.profile.bundles` 里摘掉再启动一次，最多 3 次。摘掉的记录写在
+   `$DSH_HOME/profiles/web/.harness-desktop-quarantine.json`——不落盘的话下次启动又会组合同一个坏
+   插件，等于永远打不开。启动成功后弹窗列出被停用的插件，重新安装即可再试。若把第三方层全部摘掉
+   仍然起不来，本次运行摘掉的会被**恢复原样**再按普通启动失败处理：那种失败已经不属于某个插件。
+2. **安全模式**：`--safe-mode`（或环境变量 `HARNESS_DESKTOP_SAFE_MODE=1`）启动时第三方插件层全部
+   停用，只留 dsh 自带层与应用管理的层，因此一定能进到设置页逐个排查；启动失败的弹窗里也直接给
+   这个按钮。
+3. **`--restore-plugins`**（或环境变量 `HARNESS_DESKTOP_RESTORE_PLUGINS=1`）：把之前停用的层放回去，
+   已经解析不到的条目会被跳过——放回去只会让启动再次失败。
+
+Windows 安装版的等价写法：
+
+```text
+"C:\...\Harness Desktop.exe" --safe-mode
+"C:\...\Harness Desktop.exe" --restore-plugins
+```
+
+停用与恢复只改 `dsh.profile.bundles` 和那个记录文件，不动 profile 的 `dependencies`；应用管理的层
+（`@deepseek-ai/dsh-base`、`@deepseek-ai/dsh-web-app`、modlens 与插件管理本身）永远不会被摘掉。
+
+回填只发生在**某次安装成功之后**，因此升级到带这套机制的应用后，profile 里已经装好的旧插件不会自己
+被修：它们要么在下次启动时被自愈停用（弹窗会说明），要么由你在插件管理卡片里**重新安装一次**触发
+回填，之后就能正常启动。
 
 ## 项目结构
 

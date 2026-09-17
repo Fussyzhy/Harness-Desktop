@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   DSH_RESTART_EXIT_CODE,
   PLUGIN_MANAGER_ENV_KEYS,
+  PNPM_CONFIG_ENV,
   buildDshPluginArguments,
   buildPluginManagerEnv,
   createPnpmShim,
@@ -209,8 +210,32 @@ test("the plugin manager environment carries every path the card needs", () => {
     [PLUGIN_MANAGER_ENV_KEYS.electron]: "C:\\app\\electron.exe",
     [PLUGIN_MANAGER_ENV_KEYS.storeDir]: "C:\\Users\\me\\.dsh\\.pnpm-store",
     [PLUGIN_MANAGER_ENV_KEYS.shimDir]: "C:\\Users\\me\\AppData\\Harness Desktop\\bin",
-    [PLUGIN_MANAGER_ENV_KEYS.restartExitCode]: String(DSH_RESTART_EXIT_CODE)
+    [PLUGIN_MANAGER_ENV_KEYS.restartExitCode]: String(DSH_RESTART_EXIT_CODE),
+    // The literal pnpm reads, not our constant's name: pnpm takes the setting
+    // from this environment entry, which `dsh plugin` passes on by inheritance.
+    "npm_config_auto_install_peers": "false"
   });
+});
+
+test("preparing the environment disables pnpm's peer auto-install", (t) => {
+  const dir = makeTempDir(t);
+  const prepared = preparePluginManagerEnvironment({
+    userDataDir: path.join(dir, "userData"),
+    dshHome: path.join(dir, "dsh-home"),
+    pnpmScript: path.join(dir, "pnpm", "bin", "pnpm.cjs"),
+    dshCliPath: path.join(dir, "dsh", "lib", "bin.js"),
+    electronPath: "C:\\app\\electron.exe",
+    platform: "win32",
+    baseEnv: {}
+  });
+
+  // pnpm 10.4.0 ignores `autoInstallPeers` in pnpm-workspace.yaml, so a plugin
+  // whose peers are declared as `"*"` would otherwise be resolved from the
+  // registry's stale `latest` tag — an install that ends in
+  // ERR_PNPM_FETCH_404 (a framework package that names a dependency which was
+  // never published) instead of in an installed plugin.
+  assert.equal(prepared.env["npm_config_auto_install_peers"], "false");
+  assert.deepEqual(PNPM_CONFIG_ENV, { "npm_config_auto_install_peers": "false" });
 });
 
 test("preparing the environment puts the shim first on PATH without losing its spelling", (t) => {

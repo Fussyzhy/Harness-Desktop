@@ -51,6 +51,28 @@ export const PLUGIN_MANAGER_ENV_KEYS = {
   restartExitCode: "HARNESS_DESKTOP_RESTART_EXIT_CODE"
 } as const;
 
+/**
+ * pnpm configuration the shell adds to the dsh child's environment, which
+ * `dsh plugin` hands on to pnpm by inheritance.
+ *
+ * `auto-install-peers=false` is the setting dsh's own profile template asks for
+ * in `pnpm-workspace.yaml`, repeated here because that is not a file pnpm reads
+ * it from: the bundled pnpm 10.4.0 ignores `autoInstallPeers` in a workspace
+ * file and takes the value only from `.npmrc` or the `npm_config_*`
+ * environment. Without it, an install satisfies every missing peer from the
+ * registry by its `latest` tag — so a plugin that declares the framework
+ * packages it peers on as `"*"` resolves them to the prerelease line's stale
+ * `latest`, whose own dependencies are no longer published, and the install
+ * fails with `ERR_PNPM_FETCH_404` before it adds anything. Those peers are
+ * provided by the running installation, so pnpm must not look for them.
+ *
+ * The profile carries the same setting in its own `.npmrc`; this copy is what
+ * makes it effective for a profile this application does not manage.
+ */
+export const PNPM_CONFIG_ENV: Readonly<Record<string, string>> = {
+  "npm_config_auto_install_peers": "false"
+};
+
 /** What `dsh plugin` may be asked to do with the `web` profile. */
 export type DshPluginAction = "add" | "remove" | "update";
 
@@ -200,7 +222,8 @@ export function buildPluginManagerEnv({
     [PLUGIN_MANAGER_ENV_KEYS.electron]: electronPath,
     [PLUGIN_MANAGER_ENV_KEYS.storeDir]: storeDir,
     [PLUGIN_MANAGER_ENV_KEYS.shimDir]: shimDir,
-    [PLUGIN_MANAGER_ENV_KEYS.restartExitCode]: String(restartExitCode)
+    [PLUGIN_MANAGER_ENV_KEYS.restartExitCode]: String(restartExitCode),
+    ...PNPM_CONFIG_ENV
   };
 }
 

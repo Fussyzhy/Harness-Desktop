@@ -28,6 +28,7 @@ import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { auditableSpecNames, planPeerRepairs } from "./plugin-peers.js";
 
 export const name = "harness-desktop-plugin-manager";
 
@@ -251,6 +252,64 @@ export function pluginArguments(action, specs, storeDir) {
 }
 
 /**
+ * Restore the peer versions the freshly added plugins declare.
+ *
+ * The profile installs with `auto-install-peers=false` (see
+ * `src/dsh-profile.ts` in the application repository): filling a missing peer
+ * from the registry is what turns a stale `latest` dist-tag into an
+ * `ERR_PNPM_FETCH_404` for the whole install. The plugin is left resolving that
+ * peer from the running installation instead, which is a different API line —
+ * and a plugin whose host half imports a name that line no longer exports
+ * cannot be mounted at all.
+ *
+ * A plugin's own declared range is the version range its author built against,
+ * so this is the repair: ask pnpm for exactly that range. `dsh plugin add`
+ * reconciles `dsh.profile.bundles` against installed *bundles*, so a framework
+ * package without a `dsh.bundle` declaration joins the profile as a plain
+ * dependency, exactly like the plugin's other dependencies. A peer that already
+ * resolves to a satisfying version is not touched, and a `*` range is never
+ * forwarded — that would be the same `latest` lookup this mechanism avoids.
+ *
+ * @param specs - the specs of the `add` that just succeeded.
+ * @returns the audits, the forwarded specs, and the command output to report.
+ */
+async function repairUnsatisfiedPeers(specs) {
+  const modulesDir = join(PROFILE_DIR, "node_modules");
+  const forwarded = [];
+  const audits = [];
+
+  for (const packageName of auditableSpecNames(specs, modulesDir)) {
+    const plan = planPeerRepairs({ pluginDir: join(modulesDir, packageName) });
+    const repairs = plan.repairs.filter((spec) => !forwarded.includes(spec));
+    if (plan.peers.length === 0) {
+      continue;
+    }
+    audits.push({ ...plan, repairs });
+    forwarded.push(...repairs);
+  }
+
+  if (forwarded.length === 0) {
+    return { specs: [], audits, ok: true, header: "", output: "" };
+  }
+
+  const result = await runDshPluginCommand(
+    pluginArguments("add", forwarded, environment().storeDir)
+  );
+
+  // The header is what tells the card a second command ran at all: the restore
+  // prints nothing of its own when pnpm has nothing to say.
+  return {
+    specs: forwarded,
+    audits,
+    ok: result.ok,
+    header: result.ok
+      ? `--- compatible versions restored for the installed plugins: ${forwarded.join(" ")} ---`
+      : `--- restoring compatible versions failed for: ${forwarded.join(" ")} ---`,
+    output: result.output
+  };
+}
+
+/**
  * Same-origin, loopback-only fence — the same posture dsh gives its own `/api`
  * transport. This route can install arbitrary code, so it must never be
  * reachable from another origin or from a page that a remote host served.
@@ -406,13 +465,27 @@ export function apply(ctx) {
           pluginArguments(action, specs, env.storeDir)
         );
 
+        // A plugin whose declared peers the installation does not satisfy would
+        // install cleanly and then fail to mount, so the peers this plugin asks
+        // for are restored in the same request. Only an `add` can introduce a
+        // plugin that needs them.
+        const repair =
+          result.ok && action === "add"
+            ? await repairUnsatisfiedPeers(specs)
+            : undefined;
+        const output =
+          repair !== undefined && repair.specs.length > 0
+            ? `${result.output}\n\n${repair.header}\n${repair.output}`.trim()
+            : result.output;
+
         // A failed command still answers 200: the exit code and the output are
         // what the card has to show, and an error status would throw the output
         // away before it ever reached the user.
         return send(200, {
           ok: result.ok,
-          output: result.output,
+          output,
           restartRequired: result.ok,
+          peerRepairs: repair?.specs ?? [],
           error: result.ok
             ? undefined
             : (result.error ??

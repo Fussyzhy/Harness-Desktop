@@ -149,7 +149,12 @@ async function mountHost(
   options: {
     dependencies?: Record<string, string>;
     bundles?: string[];
-    installed?: { name: string; version: string; declaresBundle: boolean }[];
+    installed?: {
+      name: string;
+      version: string;
+      declaresBundle: boolean;
+      peerDependencies?: Record<string, string>;
+    }[];
   } = {}
 ): Promise<Host> {
   const root = mkdtempSync(path.join(tmpdir(), "harness-desktop-host-"));
@@ -189,6 +194,9 @@ async function mountHost(
       JSON.stringify({
         name: entry.name,
         version: entry.version,
+        ...(entry.peerDependencies === undefined
+          ? {}
+          : { peerDependencies: entry.peerDependencies }),
         ...(entry.declaresBundle ? { dsh: { bundle: { patch: "./cordis.patch.yml" } } } : {})
       })
     );
@@ -517,4 +525,184 @@ test("the restart action answers first, then leaves with the configured code", a
   } finally {
     process.exit = originalExit;
   }
+});
+
+/**
+ * Put one framework package into the scratch tree above the profile, so the
+ * plugin's own module resolution reaches it.
+ *
+ * That copy is what the audit judges, and it is exactly the situation a profile
+ * is in after an install with peer auto-install disabled: the plugin resolves
+ * the running installation's line rather than the one it declared.
+ */
+function writeResolvablePackage(host: Host, name: string, version: string): void {
+  const dir = path.join(host.root, "node_modules", ...name.split("/"));
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    path.join(dir, "package.json"),
+    JSON.stringify({ name, version, main: "index.js" })
+  );
+  writeFileSync(path.join(dir, "index.js"), "module.exports = {};\n");
+}
+
+/** A stub `dsh` that appends every argument vector it is handed. */
+function writeArgvStub(host: Host): string {
+  const argvPath = path.join(host.root, "argv.jsonl");
+  const stubPath = path.join(host.root, "dsh-stub.mjs");
+  writeFileSync(
+    stubPath,
+    [
+      'import { appendFileSync } from "node:fs";',
+      `appendFileSync(${JSON.stringify(argvPath)}, JSON.stringify(process.argv.slice(2)) + "\\n");`
+    ].join("\n")
+  );
+  return argvPath;
+}
+
+function readArgv(argvPath: string): string[][] {
+  return readFileSync(argvPath, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as string[]);
+}
+
+/**
+ * A plugin the installation does not satisfy is installed cleanly and then
+ * cannot be mounted: its own host half imports an API the running line no longer
+ * has. Its declared range is the version range its author built against, so the
+ * same request asks pnpm for that range as a plain profile dependency.
+ */
+test("an install restores the peer versions the plugin declares", async (t) => {
+  const host = await mountHost(t, {
+    dependencies: { "@hellosz/dsh-pets": "0.2.2" },
+    bundles: [
+      "@deepseek-ai/dsh-base",
+      "@deepseek-ai/dsh-web-app",
+      "@hellosz/dsh-pets"
+    ],
+    installed: [
+      {
+        name: "@hellosz/dsh-pets",
+        version: "0.2.2",
+        declaresBundle: true,
+        peerDependencies: { "@deepseek-ai/dsh-settings": "^0.1.0-rc.6" }
+      }
+    ]
+  });
+  writeResolvablePackage(host, "@deepseek-ai/dsh-settings", "0.1.6-alpha.1");
+
+  const argvPath = writeArgvStub(host);
+  const restore = applyEnv({
+    ...AVAILABLE,
+    [PLUGIN_MANAGER_ENV_KEYS.electron]: process.execPath,
+    [PLUGIN_MANAGER_ENV_KEYS.dshCli]: path.join(host.root, "dsh-stub.mjs")
+  });
+  t.after(restore);
+
+  const response = createResponse();
+  await host.route.handler(
+    createRequest({ method: "POST", body: { action: "add", spec: "@hellosz/dsh-pets" } }),
+    response
+  );
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(json(response).ok, true);
+  assert.deepEqual(json(response).peerRepairs, ["@deepseek-ai/dsh-settings@^0.1.0-rc.6"]);
+  assert.match(json(response).output, /compatible versions restored/);
+
+  const argv = readArgv(argvPath);
+  const storeDir = AVAILABLE[PLUGIN_MANAGER_ENV_KEYS.storeDir];
+  assert.deepEqual(argv, [
+    [
+      "plugin",
+      "--profile",
+      "web",
+      "add",
+      "--workspace-root",
+      "@hellosz/dsh-pets",
+      "--store-dir",
+      storeDir
+    ],
+    [
+      "plugin",
+      "--profile",
+      "web",
+      "add",
+      "--workspace-root",
+      "@deepseek-ai/dsh-settings@^0.1.0-rc.6",
+      "--store-dir",
+      storeDir
+    ]
+  ]);
+});
+
+test("a plugin whose peers already match is left alone", async (t) => {
+  const host = await mountHost(t, {
+    dependencies: { "@hellosz/dsh-pets": "0.2.2" },
+    bundles: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@hellosz/dsh-pets"],
+    installed: [
+      {
+        name: "@hellosz/dsh-pets",
+        version: "0.2.2",
+        declaresBundle: true,
+        peerDependencies: { "@deepseek-ai/dsh-settings": "^0.1.0-rc.6" }
+      }
+    ]
+  });
+  writeResolvablePackage(host, "@deepseek-ai/dsh-settings", "0.1.0-rc.8");
+
+  const argvPath = writeArgvStub(host);
+  const restore = applyEnv({
+    ...AVAILABLE,
+    [PLUGIN_MANAGER_ENV_KEYS.electron]: process.execPath,
+    [PLUGIN_MANAGER_ENV_KEYS.dshCli]: path.join(host.root, "dsh-stub.mjs")
+  });
+  t.after(restore);
+
+  const response = createResponse();
+  await host.route.handler(
+    createRequest({ method: "POST", body: { action: "add", spec: "@hellosz/dsh-pets" } }),
+    response
+  );
+
+  assert.deepEqual(json(response).peerRepairs, []);
+  // Nothing was duplicated: only the install itself ran.
+  assert.equal(readArgv(argvPath).length, 1);
+});
+
+/**
+ * A `*` peer is the shape that aborts an install: pnpm resolves it from the
+ * registry's `latest`, which for the framework packages is a stale prerelease
+ * whose own dependencies are no longer published. It is never forwarded.
+ */
+test("a wildcard peer never becomes a registry lookup", async (t) => {
+  const host = await mountHost(t, {
+    dependencies: { "@hellosz/dsh-pets": "0.2.2" },
+    bundles: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@hellosz/dsh-pets"],
+    installed: [
+      {
+        name: "@hellosz/dsh-pets",
+        version: "0.2.2",
+        declaresBundle: true,
+        peerDependencies: { "@deepseek-ai/dsh-client-runtime": "*" }
+      }
+    ]
+  });
+
+  const argvPath = writeArgvStub(host);
+  const restore = applyEnv({
+    ...AVAILABLE,
+    [PLUGIN_MANAGER_ENV_KEYS.electron]: process.execPath,
+    [PLUGIN_MANAGER_ENV_KEYS.dshCli]: path.join(host.root, "dsh-stub.mjs")
+  });
+  t.after(restore);
+
+  const response = createResponse();
+  await host.route.handler(
+    createRequest({ method: "POST", body: { action: "add", spec: "@hellosz/dsh-pets" } }),
+    response
+  );
+
+  assert.deepEqual(json(response).peerRepairs, []);
+  assert.equal(readArgv(argvPath).length, 1);
 });

@@ -72,6 +72,7 @@ const PROFILES_DIR = "profiles";
 const PROFILE_MANIFEST_FILENAME = "package.json";
 const PROFILE_PATCH_FILENAME = "cordis.patch.yml";
 const PROFILE_PNPM_WORKSPACE_FILENAME = "pnpm-workspace.yaml";
+const PROFILE_NPMRC_FILENAME = ".npmrc";
 const MODULES_DIR_NAME = "node_modules";
 /** Staging directory for the copy-then-swap install; never a real package name. */
 const STAGING_DIR_NAME = ".harness-desktop-staging";
@@ -98,6 +99,28 @@ const PROFILE_PNPM_WORKSPACE = `packages:
 
 nodeLinker: hoisted
 autoInstallPeers: false
+`;
+
+/**
+ * The same `autoInstallPeers: false`, in the one place the pnpm this
+ * application bundles reads it from.
+ *
+ * The workspace template above is dsh's own, and pnpm 10.4.0 ignores an
+ * `autoInstallPeers` field there — it takes the value only from `.npmrc` or the
+ * `npm_config_*` environment. Left unset, an install satisfies every missing
+ * peer of a plugin from the registry by its `latest` tag, and the framework
+ * packages a plugin peers on are published as a prerelease line whose `latest`
+ * is older than what this application runs: a peer range of `"*"` resolves to a
+ * version whose own dependencies are no longer published, and the whole install
+ * fails with `ERR_PNPM_FETCH_404` before it adds anything. dsh provides those
+ * peers at runtime and never mounts a profile dependency as a layer, so an
+ * install must not go to the registry for them.
+ */
+const PROFILE_NPMRC = `# Written by Harness Desktop. A dsh plugin's peer dependencies are provided by
+# the running installation, so pnpm must not resolve them from the registry,
+# where the framework packages are published as a prerelease line whose latest
+# tag is stale. pnpm reads this here, not from pnpm-workspace.yaml.
+auto-install-peers=false
 `;
 
 /** What {@link ensureWebProfilePlugins} did, for logging and tests. */
@@ -295,6 +318,15 @@ export function ensureWebProfilePlugins({
     }
   }
 
+  // A profile dsh created itself — `dsh web` before this application ever ran,
+  // or one from a release that predates this file — carries dsh's workspace
+  // template but not the `.npmrc` pnpm reads the peer setting from, so the file
+  // is guaranteed for every profile this application manages and not only for
+  // the ones it creates. An existing file is left as the user wrote it.
+  if (outcome.status !== "skipped") {
+    writeIfAbsent(path.join(profileDir, PROFILE_NPMRC_FILENAME), PROFILE_NPMRC);
+  }
+
   // Copy only what this run actually listed: a profile this application
   // declines to manage (an unknown dsh version) must not collect modules for
   // bundles nobody composed.
@@ -308,6 +340,222 @@ export function ensureWebProfilePlugins({
         );
 
   return { ...outcome, profileDir, installed };
+}
+
+/**
+ * A start that fails before dsh reports its Web URL may be one plugin's fault,
+ * and the lever this application has is the profile's layer list: a bundle left
+ * out of `dsh.profile.bundles` is never composed, imported, or mounted.
+ *
+ * The names removed that way are recorded rather than forgotten — the next
+ * launch must not simply compose them again (it would fail again), the plugin
+ * manager reports them as installed but not mounted, and one action puts them
+ * back.
+ */
+export const PROFILE_QUARANTINE_FILENAME = ".harness-desktop-quarantine.json";
+
+/** Why a bundle left the profile's layer stack. */
+export type QuarantineReason = "startup-failure" | "safe-mode";
+
+export type QuarantineRecord = {
+  /** Bundles removed from `dsh.profile.bundles`, in the order they were removed. */
+  disabled: string[];
+  reason: QuarantineReason;
+  /** ISO timestamp of the last write. */
+  at: string;
+};
+
+export interface ProfileQuarantineOptions {
+  /** dsh home; defaults to the value dsh itself would resolve. */
+  home?: string;
+  /** File inside the dsh installation used as the first resolution anchor. */
+  installAnchor?: string;
+  /** Managed bundles that are never candidates; defaults to {@link BUNDLED_PROFILE_PLUGINS}. */
+  additions?: readonly string[];
+  /** Application-local bundles that are never candidates. */
+  localAdditions?: readonly LocalProfilePlugin[];
+}
+
+/** The bundle names this application ships or manages itself. */
+function managedBundleNames(
+  additions: readonly string[],
+  localAdditions: readonly LocalProfilePlugin[]
+): Set<string> {
+  return new Set([
+    ...WEB_PROFILE_TEMPLATE_BUNDLES,
+    ...additions,
+    ...localAdditions.map((plugin) => plugin.name)
+  ]);
+}
+
+/**
+ * The profile's bundles that came from a user or a third-party install, in
+ * layer order: everything this application does not itself ship or manage.
+ */
+export function thirdPartyProfileBundles({
+  home = resolveDshHome(),
+  additions = BUNDLED_PROFILE_PLUGINS,
+  localAdditions = []
+}: ProfileQuarantineOptions = {}): string[] {
+  const profileDir = resolveWebProfileDir(home);
+  const manifest = readManifest(path.join(profileDir, PROFILE_MANIFEST_FILENAME));
+  if (manifest === undefined) {
+    return [];
+  }
+
+  const managed = managedBundleNames(additions, localAdditions);
+  return readBundles(manifest).filter((name) => !managed.has(name));
+}
+
+/** The quarantine record of a profile, when one is present and well formed. */
+export function readQuarantine(
+  home: string = resolveDshHome()
+): QuarantineRecord | undefined {
+  const record = readManifest(
+    path.join(resolveWebProfileDir(home), PROFILE_QUARANTINE_FILENAME)
+  );
+  const disabled = record?.disabled;
+  if (
+    !Array.isArray(disabled) ||
+    !disabled.every((name) => typeof name === "string")
+  ) {
+    return undefined;
+  }
+
+  return {
+    disabled: disabled.filter((name): name is string => typeof name === "string"),
+    reason: record?.reason === "safe-mode" ? "safe-mode" : "startup-failure",
+    at: typeof record?.at === "string" ? record.at : ""
+  };
+}
+
+/**
+ * Take bundles out of the profile's layer stack and record the removal.
+ *
+ * A bundle this application manages is never a candidate: it is copied back on
+ * every start, so removing one would only be undone at the next launch.
+ *
+ * @returns the record after the removal, or `undefined` when there is no
+ *   profile manifest to edit.
+ */
+export function quarantineProfileBundles({
+  home = resolveDshHome(),
+  names,
+  reason,
+  additions = BUNDLED_PROFILE_PLUGINS,
+  localAdditions = []
+}: ProfileQuarantineOptions & {
+  names: readonly string[];
+  reason: QuarantineReason;
+}): QuarantineRecord | undefined {
+  const profileDir = resolveWebProfileDir(home);
+  const manifestPath = path.join(profileDir, PROFILE_MANIFEST_FILENAME);
+  const manifest = readManifest(manifestPath);
+  if (manifest === undefined) {
+    return undefined;
+  }
+
+  const existing = readQuarantine(home);
+  const managed = managedBundleNames(additions, localAdditions);
+  const candidates = names.filter((name) => !managed.has(name));
+  const current = readBundles(manifest);
+  const removed = current.filter((name) => candidates.includes(name));
+  if (removed.length === 0) {
+    return existing;
+  }
+
+  writeManifest(
+    manifestPath,
+    withBundles(
+      manifest,
+      current.filter((name) => !removed.includes(name))
+    )
+  );
+
+  const record: QuarantineRecord = {
+    disabled: [...new Set([...(existing?.disabled ?? []), ...removed])],
+    reason,
+    at: new Date().toISOString()
+  };
+  writeManifest(path.join(profileDir, PROFILE_QUARANTINE_FILENAME), { ...record });
+  return record;
+}
+
+export interface RestoreQuarantineOptions extends ProfileQuarantineOptions {
+  /**
+   * The recorded names to restore; every recorded name when omitted.
+   *
+   * A subset keeps the record for everything it did not cover, so one launch
+   * undoing its own recovery cannot hand back a bundle an earlier launch had
+   * already found unmountable.
+   */
+  names?: readonly string[];
+}
+
+/**
+ * Put recorded bundles back into the layer stack.
+ *
+ * A recorded name that no longer resolves is dropped instead of restored: a
+ * listed bundle dsh cannot resolve aborts the boot this exists to repair.
+ *
+ * @returns the names actually restored.
+ */
+export function restoreQuarantinedBundles({
+  home = resolveDshHome(),
+  installAnchor = resolveDshPackageJsonPath(),
+  names
+}: RestoreQuarantineOptions = {}): string[] {
+  const profileDir = resolveWebProfileDir(home);
+  const record = readQuarantine(home);
+  if (record === undefined) {
+    return [];
+  }
+
+  const selected =
+    names === undefined
+      ? record.disabled
+      : record.disabled.filter((name) => names.includes(name));
+  if (selected.length === 0) {
+    return [];
+  }
+
+  const manifestPath = path.join(profileDir, PROFILE_MANIFEST_FILENAME);
+  const manifest = readManifest(manifestPath);
+  const mountable = selected.filter(
+    (name) =>
+      manifest !== undefined && isBundleMountable(name, installAnchor, profileDir)
+  );
+
+  if (manifest !== undefined && mountable.length > 0) {
+    const desired = readBundles(manifest);
+    for (const name of mountable) {
+      if (!desired.includes(name)) {
+        desired.push(name);
+      }
+    }
+    writeManifest(manifestPath, withBundles(manifest, desired));
+  }
+
+  const remaining = record.disabled.filter((name) => !selected.includes(name));
+  const recordPath = path.join(profileDir, PROFILE_QUARANTINE_FILENAME);
+  if (remaining.length === 0) {
+    rmSync(recordPath, { force: true });
+  } else {
+    writeManifest(recordPath, {
+      disabled: remaining,
+      reason: record.reason,
+      at: new Date().toISOString()
+    });
+  }
+
+  const dropped = selected.filter((name) => !mountable.includes(name));
+  if (dropped.length > 0) {
+    console.warn(
+      `Restored quarantined profile bundles, left out the ones that no longer resolve: ${dropped.join(", ")}`
+    );
+  }
+
+  return mountable;
 }
 
 /** Write a fresh profile from the shipped `web` template plus the additions. */
@@ -353,6 +601,7 @@ function createWebProfile({
     path.join(profileDir, PROFILE_PNPM_WORKSPACE_FILENAME),
     PROFILE_PNPM_WORKSPACE
   );
+  writeIfAbsent(path.join(profileDir, PROFILE_NPMRC_FILENAME), PROFILE_NPMRC);
 
   return { status: "created", profileDir, bundles: list };
 }

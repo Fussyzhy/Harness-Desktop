@@ -9,9 +9,13 @@ import {
   SUPPORTED_DSH_VERSION,
   ensureWebProfilePlugins,
   isBundleMountable,
+  quarantineProfileBundles,
   readInstalledDshVersion,
+  readQuarantine,
   resolveDshHome,
-  resolveWebProfileDir
+  resolveWebProfileDir,
+  restoreQuarantinedBundles,
+  thirdPartyProfileBundles
 } from "../src/dsh-profile.js";
 
 const PROJECT_ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -179,6 +183,12 @@ test("ensureWebProfilePlugins creates the profile from the shipped template", (t
     readFileSync(path.join(result.profileDir, "pnpm-workspace.yaml"), "utf8"),
     /nodeLinker: hoisted/
   );
+  // pnpm 10.4.0 ignores `autoInstallPeers` in that workspace file, so the
+  // setting only reaches pnpm through the profile's own `.npmrc`.
+  assert.match(
+    readFileSync(path.join(result.profileDir, ".npmrc"), "utf8"),
+    /^auto-install-peers=false$/m
+  );
   // The composed row is imported by the loader from the profile directory, so
   // the plugin has to exist there — composing the layer alone is not enough.
   assert.deepEqual(result.installed, ["@liustack/modlens"]);
@@ -287,6 +297,8 @@ test("ensureWebProfilePlugins refuses to invent a template for another dsh", (t)
   assert.match(result.reason ?? "", /not the supported/);
   assert.equal(readInstalledDshVersion(install.anchor), SUPPORTED_DSH_VERSION);
   assert.throws(() => readProfileManifest(result.profileDir));
+  // A profile this application declines to manage collects no files from it.
+  assert.equal(existsSync(path.join(result.profileDir, ".npmrc")), false);
 });
 
 test("ensureWebProfilePlugins appends to an existing profile and preserves it", (t) => {
@@ -337,6 +349,76 @@ test("ensureWebProfilePlugins appends to an existing profile and preserves it", 
       }
     }
   });
+});
+
+test("ensureWebProfilePlugins writes the peer setting into a profile dsh created", (t) => {
+  const install = createScratchInstall([
+    { name: "@liustack/modlens", declaresBundle: true }
+  ]);
+  const home = createScratchHome();
+  t.after(() => {
+    rmSync(install.root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  // `dsh web` on its own writes the workspace template but no `.npmrc`, and a
+  // profile installed from a release before that file existed looks the same.
+  // Without it pnpm resolves a plugin's peers from the registry instead of
+  // leaving them to the installation that provides them.
+  const profileDir = resolveWebProfileDir(home);
+  mkdirSync(profileDir, { recursive: true });
+  writeFileSync(
+    path.join(profileDir, "package.json"),
+    JSON.stringify({
+      name: "dsh-profile-web",
+      private: true,
+      dsh: {
+        profile: {
+          bundles: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"],
+          patchReload: "live"
+        }
+      }
+    })
+  );
+
+  const result = ensureWebProfilePlugins({ home, installAnchor: install.anchor });
+
+  assert.equal(result.status, "updated");
+  assert.match(
+    readFileSync(path.join(profileDir, ".npmrc"), "utf8"),
+    /^auto-install-peers=false$/m
+  );
+});
+
+test("ensureWebProfilePlugins leaves a profile's own .npmrc alone", (t) => {
+  const install = createScratchInstall([
+    { name: "@liustack/modlens", declaresBundle: true }
+  ]);
+  const home = createScratchHome();
+  t.after(() => {
+    rmSync(install.root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const profileDir = resolveWebProfileDir(home);
+  mkdirSync(profileDir, { recursive: true });
+  writeFileSync(
+    path.join(profileDir, "package.json"),
+    JSON.stringify({
+      name: "dsh-profile-web",
+      private: true,
+      dsh: { profile: { bundles: ["@deepseek-ai/dsh-base"] } }
+    })
+  );
+  writeFileSync(path.join(profileDir, ".npmrc"), "strict-peer-dependencies=true\n");
+
+  ensureWebProfilePlugins({ home, installAnchor: install.anchor });
+
+  // The file configures the user's own pnpm; only its absence is repaired.
+  assert.equal(
+    readFileSync(path.join(profileDir, ".npmrc"), "utf8"),
+    "strict-peer-dependencies=true\n"
+  );
 });
 
 test("ensureWebProfilePlugins is idempotent", (t) => {
@@ -431,4 +513,181 @@ test("every bundled plugin is a pinned dependency of this package", () => {
     assert.ok(declared, `${plugin} must be a dependency so packaging ships it`);
     assert.match(declared, /^\d+\.\d+\.\d+/, `${plugin} must be pinned exactly`);
   }
+});
+
+/**
+ * A profile whose third-party plugins are in place, and the scratch install
+ * that resolves them. `plugins` names the third-party bundles the profile
+ * carries; the managed additions come from `ensureWebProfilePlugins` itself.
+ */
+function createProfileWithPlugins(
+  t: { after: (fn: () => void) => void },
+  plugins: readonly string[]
+): { home: string; anchor: string; profileDir: string } {
+  const install = createScratchInstall([
+    { name: "@liustack/modlens", declaresBundle: true },
+    ...plugins.map((name) => ({ name, declaresBundle: true }))
+  ]);
+  const home = createScratchHome();
+  t.after(() => {
+    rmSync(install.root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const created = ensureWebProfilePlugins({
+    home,
+    installAnchor: install.anchor,
+    additions: ["@liustack/modlens"],
+    localAdditions: []
+  });
+  assert.equal(created.status, "created");
+
+  // What `dsh plugin add` leaves behind: the installed name joins the layer
+  // list, which is the list a failed start has to prune.
+  const profileDir = resolveWebProfileDir(home);
+  const manifestPath = path.join(profileDir, "package.json");
+  const manifest = readProfileManifest(profileDir);
+  const profile = (manifest.dsh as { profile: { bundles: string[] } }).profile;
+  profile.bundles.push(...plugins);
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+
+  return { home, anchor: install.anchor, profileDir };
+}
+
+function readBundles(profileDir: string): string[] {
+  const manifest = readProfileManifest(profileDir);
+  return (manifest.dsh as { profile: { bundles: string[] } }).profile.bundles;
+}
+
+test("third-party bundles are the ones this application does not manage", (t) => {
+  const { home, anchor } = createProfileWithPlugins(t, ["dsh-free-search"]);
+
+  assert.deepEqual(
+    thirdPartyProfileBundles({ home, installAnchor: anchor, additions: ["@liustack/modlens"] }),
+    ["dsh-free-search"]
+  );
+});
+
+/**
+ * dsh fails to boot at all when a plugin cannot be composed or imported, and
+ * the profile's layer list is the only lever this application has. The removal
+ * has to be recorded, or the next launch composes the same failing plugin again.
+ */
+test("a failed start drops one plugin bundle and can hand it back", (t) => {
+  const { home, anchor, profileDir } = createProfileWithPlugins(t, [
+    "dsh-free-search",
+    "dsh-dream-skin"
+  ]);
+  const options = { home, installAnchor: anchor, additions: ["@liustack/modlens"] };
+
+  const record = quarantineProfileBundles({
+    ...options,
+    names: ["dsh-dream-skin"],
+    reason: "startup-failure"
+  });
+
+  assert.equal(record?.reason, "startup-failure");
+  assert.deepEqual(record?.disabled, ["dsh-dream-skin"]);
+  assert.deepEqual(readBundles(profileDir), [
+    "@deepseek-ai/dsh-base",
+    "@deepseek-ai/dsh-web-app",
+    "@liustack/modlens",
+    "dsh-free-search"
+  ]);
+  assert.deepEqual(readQuarantine(home)?.disabled, ["dsh-dream-skin"]);
+
+  // A bundle this application manages is copied back on every start, so it can
+  // never be a candidate: the request leaves the record exactly as it was.
+  const unchanged = quarantineProfileBundles({
+    ...options,
+    names: ["@liustack/modlens"],
+    reason: "safe-mode"
+  });
+  assert.deepEqual(unchanged?.disabled, ["dsh-dream-skin"]);
+  assert.ok(readBundles(profileDir).includes("@liustack/modlens"));
+
+  assert.deepEqual(restoreQuarantinedBundles(options), ["dsh-dream-skin"]);
+  assert.ok(readBundles(profileDir).includes("dsh-dream-skin"));
+  assert.equal(readQuarantine(home), undefined);
+});
+
+/**
+ * The record outlives the launch that wrote it, and a launch that undoes its own
+ * recovery knows nothing about the removals before it: handing those back would
+ * reinstate a bundle another launch already found unmountable.
+ */
+test("restoring this launch's removals leaves an earlier launch's alone", (t) => {
+  const { home, anchor, profileDir } = createProfileWithPlugins(t, [
+    "dsh-free-search",
+    "dsh-dream-skin"
+  ]);
+  const options = { home, installAnchor: anchor, additions: ["@liustack/modlens"] };
+
+  quarantineProfileBundles({
+    ...options,
+    names: ["dsh-free-search"],
+    reason: "startup-failure"
+  });
+  quarantineProfileBundles({
+    ...options,
+    names: ["dsh-dream-skin"],
+    reason: "startup-failure"
+  });
+
+  assert.deepEqual(
+    restoreQuarantinedBundles({ ...options, names: ["dsh-dream-skin"] }),
+    ["dsh-dream-skin"]
+  );
+  assert.ok(readBundles(profileDir).includes("dsh-dream-skin"));
+  assert.ok(!readBundles(profileDir).includes("dsh-free-search"));
+  assert.deepEqual(readQuarantine(home)?.disabled, ["dsh-free-search"]);
+
+  // A name the record does not hold restores nothing, so the record stands.
+  assert.deepEqual(
+    restoreQuarantinedBundles({ ...options, names: ["dsh-not-installed"] }),
+    []
+  );
+  assert.deepEqual(readQuarantine(home)?.disabled, ["dsh-free-search"]);
+});
+
+test("a restored bundle that no longer resolves stays out of the layer list", (t) => {
+  const { home, profileDir } = createProfileWithPlugins(t, ["dsh-live2d-pets"]);
+  quarantineProfileBundles({ home, names: ["dsh-live2d-pets"], reason: "startup-failure" });
+
+  // The same profile, but the plugin is gone from the installation: restoring it
+  // would abort the boot this recovery exists to repair.
+  const replacement = createScratchInstall([{ name: "@liustack/modlens", declaresBundle: true }]);
+  t.after(() => {
+    rmSync(replacement.root, { recursive: true, force: true });
+  });
+
+  assert.deepEqual(
+    restoreQuarantinedBundles({ home, installAnchor: replacement.anchor }),
+    []
+  );
+  assert.ok(!readBundles(profileDir).includes("dsh-live2d-pets"));
+  assert.equal(readQuarantine(home), undefined);
+});
+
+test("safe mode records why the plugins went away", (t) => {
+  const { home, anchor, profileDir } = createProfileWithPlugins(t, [
+    "dsh-free-search",
+    "dsh-dream-skin"
+  ]);
+
+  const record = quarantineProfileBundles({
+    home,
+    installAnchor: anchor,
+    additions: ["@liustack/modlens"],
+    names: ["dsh-free-search", "dsh-dream-skin"],
+    reason: "safe-mode"
+  });
+
+  assert.equal(record?.reason, "safe-mode");
+  assert.deepEqual(readQuarantine(home), record);
+  assert.deepEqual(readBundles(profileDir), [
+    "@deepseek-ai/dsh-base",
+    "@deepseek-ai/dsh-web-app",
+    "@liustack/modlens"
+  ]);
 });
