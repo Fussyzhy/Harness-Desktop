@@ -16,7 +16,7 @@
     "predev": "npm run patch:dsh && tsc -p tsconfig.json",
     "dev": "electron .",
     "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
-    "test": "tsx --test test/dsh-server.test.ts test/dsh-directory-picker-patch.test.ts test/dsh-settings-open-patch.test.ts test/dsh-open-in-app-patch.test.ts test/dsh-win32-process-console-window-patch.test.ts test/dsh-plugin-manager-console-window.test.ts test/dsh-profile.test.ts test/dsh-plugins.test.ts test/dsh-version-drift.test.ts",
+    "test": "tsx --test test/dsh-server.test.ts test/dsh-directory-picker-patch.test.ts test/dsh-settings-open-patch.test.ts test/dsh-open-in-app-patch.test.ts test/dsh-win32-process-console-window-patch.test.ts test/dsh-plugin-manager-console-window.test.ts test/dsh-profile.test.ts test/dsh-plugins.test.ts test/dsh-version-drift.test.ts test/modlens-cli.test.ts",
     "package:dir": "npm run build && electron-builder --dir",
     "package:win": "npm run build && electron-builder --win nsis",
     "patch:app": "node scripts/patch-installed-app.cjs",

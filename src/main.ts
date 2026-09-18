@@ -19,6 +19,7 @@ import {
   DSH_RESTART_EXIT_CODE,
   preparePluginManagerEnvironment
 } from "./dsh-plugins.js";
+import { ModlensConfigWindow } from "./modlens-config.js";
 import { PetOverlayController } from "./pet-overlay.js";
 
 const DSH_HOST = "127.0.0.1";
@@ -153,6 +154,11 @@ let quarantineAttempts = 0;
 const claimedFailures = new WeakSet<ChildProcess>();
 /** The floating desktop pet; `undefined` until the application starts. */
 let petOverlay: PetOverlayController | undefined;
+/**
+ * The vision engine's settings window. Created with the application so its IPC
+ * exists before the first tray click, and kept across opens and closes.
+ */
+let modlensConfig: ModlensConfigWindow | undefined;
 /**
  * Handle of the injected "hide the in-window pet" stylesheet. It dies with the
  * document, so every load starts from `undefined` again.
@@ -681,6 +687,13 @@ function buildTrayMenu(): Menu {
         tray?.setContextMenu(buildTrayMenu());
       }
     },
+    {
+      // The plugin's own settings card is a browser-side slot registration, and
+      // the seat it used no longer exists in this dsh release; this window is
+      // where its settings live instead.
+      label: "视觉引擎（ModLens）…",
+      click: () => modlensConfig?.open()
+    },
     { label: "关闭", click: quitApplication }
   ]);
 }
@@ -964,6 +977,11 @@ async function startApplication(): Promise<void> {
     void syncInWindowPet();
   });
 
+  modlensConfig = new ModlensConfigWindow({
+    appRoot: app.getAppPath(),
+    log: (message) => appendLog("modlens", Buffer.from(message))
+  });
+
   await createMainWindow();
   await updateLoadingStatus(`正在启动 ${APP_NAME}…`);
   // The profile and the plugin-manager environment are prepared inside
@@ -1022,5 +1040,7 @@ app.on("before-quit", () => {
   tray = undefined;
   petOverlay?.dispose();
   petOverlay = undefined;
+  modlensConfig?.dispose();
+  modlensConfig = undefined;
   stopDshServer();
 });

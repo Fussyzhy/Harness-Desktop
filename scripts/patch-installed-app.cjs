@@ -25,6 +25,8 @@ const PACKED_SOURCES = [
   "src/pet-overlay.html",
   "src/pet-overlay-page.js",
   "src/pet-overlay-preload.cjs",
+  "src/modlens-config.html",
+  "src/modlens-config-preload.cjs",
   "build/icon.png"
 ];
 

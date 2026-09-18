@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>视觉引擎（ModLens）</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", "Microsoft YaHei", sans-serif;
+        background: #15171a;
+        color: #e8eaf0;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        padding: 20px 22px 26px;
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      h1 {
+        margin: 0 0 6px;
+        font-size: 17px;
+        font-weight: 600;
+      }
+
+      h2 {
+        margin: 22px 0 8px;
+        font-size: 13px;
+        font-weight: 600;
+        color: #b9c0d0;
+      }
+
+      p.intro {
+        margin: 0;
+        color: #8b93a5;
+      }
+
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        color: #cbd3e4;
+        word-break: break-all;
+      }
+
+      .card {
+        border: 1px solid #2a2e38;
+        border-radius: 10px;
+        padding: 12px 14px;
+        background: #1a1d22;
+      }
+
+      .row {
+        display: flex;
+        gap: 10px;
+        align-items: baseline;
+        justify-content: space-between;
+        padding: 3px 0;
+      }
+
+      .row > .label {
+        color: #8b93a5;
+        flex: 0 0 auto;
+      }
+
+      .row > .value {
+        text-align: right;
+        word-break: break-all;
+      }
+
+      .ok {
+        color: #6fd08c;
+      }
+
+      .bad {
+        color: #f2a1a1;
+      }
+
+      .muted {
+        color: #8b93a5;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      th,
+      td {
+        text-align: left;
+        padding: 6px 8px 6px 0;
+        border-bottom: 1px solid #23262e;
+        vertical-align: top;
+      }
+
+      th {
+        color: #8b93a5;
+        font-weight: 500;
+      }
+
+      tr:last-child td {
+        border-bottom: 0;
+      }
+
+      fieldset {
+        border: 1px solid #2a2e38;
+        border-radius: 10px;
+        margin: 0 0 12px;
+        padding: 10px 12px 12px;
+      }
+
+      legend {
+        padding: 0 6px;
+        color: #b9c0d0;
+      }
+
+      label.field {
+        display: block;
+        margin: 8px 0 0;
+      }
+
+      label.field > span {
+        display: block;
+        color: #8b93a5;
+        margin-bottom: 3px;
+      }
+
+      input,
+      select {
+        width: 100%;
+        padding: 6px 8px;
+        border-radius: 7px;
+        border: 1px solid #333846;
+        background: #101215;
+        color: #e8eaf0;
+        font: inherit;
+      }
+
+      input:focus,
+      select:focus {
+        outline: 1px solid #4a6ea8;
+        border-color: #4a6ea8;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0 12px;
+      }
+
+      .actions {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        position: sticky;
+        bottom: 0;
+        padding: 12px 0 0;
+        background: linear-gradient(#15171a00, #15171a 40%);
+      }
+
+      button {
+        padding: 7px 14px;
+        border-radius: 8px;
+        border: 1px solid #333846;
+        background: #232833;
+        color: #e8eaf0;
+        font: inherit;
+        cursor: pointer;
+      }
+
+      button.primary {
+        background: #2f5c9e;
+        border-color: #3a6cb5;
+      }
+
+      button:hover {
+        filter: brightness(1.12);
+      }
+
+      #message {
+        margin-left: auto;
+        text-align: right;
+      }
+
+      details {
+        margin-top: 18px;
+      }
+
+      summary {
+        cursor: pointer;
+        color: #8b93a5;
+      }
+
+      pre {
+        max-height: 320px;
+        overflow: auto;
+        padding: 10px;
+        border-radius: 8px;
+        background: #101215;
+        border: 1px solid #23262e;
+        font-size: 11.5px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>视觉引擎（ModLens）</h1>
+    <p class="intro">
+      配置由插件自己的命令行写入 <code id="config-path">~/.modlens/config.json</code>，与终端里
+      <code>modlens config set</code> 改的是同一份，保存后立即生效，不需要重启客户端。
+    </p>
+
+    <h2>状态</h2>
+    <div class="card" id="status">
+      <div class="row"><span class="label">正在读取…</span></div>
+    </div>
+
+    <h2>引擎</h2>
+    <form id="form" autocomplete="off"></form>
+
+    <div class="actions">
+      <button class="primary" type="button" id="save">保存</button>
+      <button type="button" id="reload">重新检测</button>
+      <button type="button" id="close">关闭</button>
+      <span id="message"></span>
+    </div>
+
+    <details>
+      <summary>原始检测报告（doctor --json）</summary>
+      <pre id="raw">（尚未读取）</pre>
+    </details>
+
+    <script>
+      const api = window.modlensConfig;
+      const form = document.getElementById("form");
+      const status = document.getElementById("status");
+      const message = document.getElementById("message");
+      const raw = document.getElementById("raw");
+      const configPath = document.getElementById("config-path");
+
+      /** 字段的中文说明；未知字段直接显示原键名。 */
+      const FIELD_LABELS = {
+        apiKey: "API Key",
+        baseUrl: "Base URL",
+        model: "模型",
+        proxy: "代理",
+        extraBody: "额外请求体（JSON）"
+      };
+
+      function row(label, value, modifier) {
+        const line = document.createElement("div");
+        line.className = "row";
+        const name = document.createElement("span");
+        name.className = "label";
+        name.textContent = label;
+        const text = document.createElement("span");
+        text.className = "value" + (modifier ? " " + modifier : "");
+        text.textContent = value;
+        line.append(name, text);
+        return line;
+      }
+
+      function field(container, label, control) {
+        const wrap = document.createElement("label");
+        wrap.className = "field";
+        const caption = document.createElement("span");
+        caption.textContent = label;
+        wrap.append(caption, control);
+        container.append(wrap);
+        return control;
+      }
+
+      function textInput(key, placeholder) {
+        const input = document.createElement("input");
+        input.type = "text";
+        input.dataset.key = key;
+        input.placeholder = placeholder;
+        return input;
+      }
+
+      function selectInput(key, options) {
+        const select = document.createElement("select");
+        select.dataset.key = key;
+        for (const [value, label] of options) {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = label;
+          select.append(option);
+        }
+        return select;
+      }
+
+      function providerTable(providers) {
+        const table = document.createElement("table");
+        const head = document.createElement("tr");
+        for (const title of ["引擎", "状态", "说明"]) {
+          const th = document.createElement("th");
+          th.textContent = title;
+          head.append(th);
+        }
+        table.append(head);
+
+        for (const provider of providers) {
+          const line = document.createElement("tr");
+          const name = document.createElement("td");
+          name.textContent = provider.name + (provider.kind ? `（${provider.kind}）` : "");
+          const ready = document.createElement("td");
+          ready.className = provider.ready ? "ok" : "bad";
+          ready.textContent = provider.ready ? "就绪" : provider.status || "未就绪";
+          const detail = document.createElement("td");
+          detail.className = "muted";
+          detail.textContent = provider.detail || provider.fix || "";
+          line.append(name, ready, detail);
+          table.append(line);
+        }
+        return table;
+      }
+
+      function renderStatus(data) {
+        status.replaceChildren();
+        const doctor = data.doctor;
+        const filePath = doctor && doctor.configPath ? doctor.configPath : data.cliPath || "";
+
+        if (!data.available) {
+          status.append(row("不可用", data.reason || "未知原因", "bad"));
+          return;
+        }
+
+        configPath.textContent = filePath;
+
+        if (!doctor) {
+          status.append(row("检测报告", "命令行没有返回可解析的 JSON，见下面的原始输出", "bad"));
+        } else {
+          const providers = listOf(doctor.providers);
+          status.append(
+            row(
+              "当前引擎",
+              doctor.selection || "未选择",
+              doctor.selection ? "ok" : "bad"
+            )
+          );
+          for (const provider of providers) {
+            if (provider.ready) {
+              status.append(row("可用引擎", provider.name, "ok"));
+            }
+          }
+          const unusable = providers.filter((provider) => !provider.ready);
+          if (unusable.length > 0) {
+            status.append(
+              row("还没配好的引擎", unusable.map((provider) => provider.name).join("、"))
+            );
+          }
+          if (doctor.nodeVersion) {
+            status.append(
+              row(
+                "Node 运行时",
+                `${doctor.nodeVersion}（最低 ${doctor.nodeMeetsMinimum === false ? "不满足" : "满足"}）`,
+                doctor.nodeMeetsMinimum === false ? "bad" : "ok"
+              )
+            );
+          }
+          if (doctor.nodeSqlite === false) {
+            status.append(row("node:sqlite", "不可用（OpenCode 粘贴恢复会少一项）", "bad"));
+          }
+        }
+
+        status.append(row("命令行", data.cliPath || ""));
+      }
+
+      /** 这一页只读它认识的形状；缺字段时当作空，不当作错误。 */
+      function listOf(value) {
+        return Array.isArray(value) ? value : [];
+      }
+
+      function renderForm(data) {
+        form.replaceChildren();
+        const doctor = data.doctor;
+        if (!data.available || !doctor) {
+          return;
+        }
+
+        const providers = listOf(doctor.providers);
+        const reuseEntries = listOf(doctor.reuse);
+
+        const engine = document.createElement("fieldset");
+        const engineLegend = document.createElement("legend");
+        engineLegend.textContent = "选择引擎与凭证";
+        engine.append(engineLegend);
+
+        if (providers.length > 0) {
+          const options = [["", "（不改动）"]].concat(
+            providers.map((provider) => [
+              provider.name,
+              provider.ready ? `${provider.name}（就绪）` : provider.name
+            ])
+          );
+          const select = selectInput("provider", options);
+          if (doctor.selection) {
+            select.value = doctor.selection;
+          }
+          field(engine, "provider（优先使用哪个引擎）", select);
+        }
+
+        for (const provider of providers) {
+          const settings = listOf(provider.settings);
+          if (settings.length === 0) {
+            continue;
+          }
+          const group = document.createElement("fieldset");
+          const legend = document.createElement("legend");
+          legend.textContent = provider.name;
+          group.append(legend);
+
+          const grid = document.createElement("div");
+          grid.className = "grid";
+          for (const setting of settings) {
+            const key = `${provider.name}.${setting.field}`;
+            const label = FIELD_LABELS[setting.field] || setting.field;
+            const placeholder = setting.present ? "已配置（留空不改动）" : "未配置";
+            if (setting.field === "apiKey") {
+              const input = textInput(key, placeholder);
+              input.type = "password";
+              input.dataset.secret = "true";
+              field(grid, `${label}（${setting.field}）`, input);
+            } else {
+              field(grid, `${label}（${setting.field}）`, textInput(key, placeholder));
+            }
+          }
+          group.append(grid);
+          engine.append(group);
+        }
+
+        const general = document.createElement("fieldset");
+        const generalLegend = document.createElement("legend");
+        generalLegend.textContent = "通用";
+        general.append(generalLegend);
+        const generalGrid = document.createElement("div");
+        generalGrid.className = "grid";
+        field(generalGrid, "代理（proxy，留空不改动）", textInput("proxy", "http://127.0.0.1:7890"));
+        field(
+          generalGrid,
+          "冷却（cooldown，失败后暂时跳过该引擎）",
+          selectInput("cooldown", [
+            ["", "（不改动）"],
+            ["on", "开启"],
+            ["off", "关闭"]
+          ])
+        );
+        general.append(generalGrid);
+        engine.append(general);
+
+        if (reuseEntries.length > 0) {
+          const reuse = document.createElement("fieldset");
+          const reuseLegend = document.createElement("legend");
+          reuseLegend.textContent = "复用本机已登录的命令行";
+          reuse.append(reuseLegend);
+          const reuseGrid = document.createElement("div");
+          reuseGrid.className = "grid";
+          for (const entry of reuseEntries) {
+            field(
+              reuseGrid,
+              `${entry.harness}（当前：${entry.decision}）`,
+              selectInput(`reuse.${entry.harness}`, [
+                ["", "（不改动）"],
+                ["true", "允许复用"],
+                ["false", "不允许"]
+              ])
+            );
+          }
+          reuse.append(reuseGrid);
+          engine.append(reuse);
+        }
+
+        form.append(engine);
+      }
+
+      function collectChanges() {
+        const changes = [];
+        for (const control of form.querySelectorAll("[data-key]")) {
+          if (control.value === "") {
+            continue;
+          }
+          changes.push({
+            key: control.dataset.key,
+            value: control.value,
+            secret: control.dataset.secret === "true"
+          });
+        }
+        // 密钥框只写不读：保存后一律清空，避免把输入留在界面上。
+        for (const control of form.querySelectorAll('input[data-secret="true"]')) {
+          control.value = "";
+        }
+        return changes;
+      }
+
+      function render(data) {
+        renderStatus(data);
+        renderForm(data);
+        raw.textContent = data.raw || (data.doctor ? JSON.stringify(data.doctor, null, 2) : "（无）");
+      }
+
+      async function load() {
+        message.textContent = "读取中…";
+        message.className = "muted";
+        try {
+          render(await api.load());
+          message.textContent = "";
+        } catch (error) {
+          message.textContent = "读取失败：" + error.message;
+          message.className = "bad";
+        }
+      }
+
+      document.getElementById("save").addEventListener("click", async () => {
+        const changes = collectChanges();
+        if (changes.length === 0) {
+          message.textContent = "没有要保存的改动。";
+          message.className = "muted";
+          return;
+        }
+        message.textContent = "保存中…";
+        message.className = "muted";
+        try {
+          const result = await api.save(changes);
+          const parts = [];
+          if (result.applied.length > 0) {
+            parts.push("已保存：" + result.applied.join("、"));
+          }
+          if (result.failed.length > 0) {
+            parts.push(
+              "被拒绝：" +
+                result.failed.map((entry) => `${entry.key}（${entry.detail}）`).join("；")
+            );
+          }
+          if (result.reload) {
+            render(result.reload);
+          }
+          message.textContent = parts.join("　") || "没有任何改动被写入。";
+          message.className = result.failed.length > 0 ? "bad" : "ok";
+        } catch (error) {
+          message.textContent = "保存失败：" + error.message;
+          message.className = "bad";
+        }
+      });
+
+      document.getElementById("reload").addEventListener("click", load);
+      document.getElementById("close").addEventListener("click", () => api.close());
+
+      load();
+    </script>
+  </body>
+</html>

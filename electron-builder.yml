@@ -15,6 +15,9 @@ files:
   - src/pet-overlay.html
   - src/pet-overlay-page.js
   - src/pet-overlay-preload.cjs
+  # The vision engine's settings page, shipped the same way.
+  - src/modlens-config.html
+  - src/modlens-config-preload.cjs
   - build/icon.png
   - package.json
 

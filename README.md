@@ -301,7 +301,19 @@ Harness Desktop
 - `gemini-api` / `openai` / `anthropic`：填 API key，并支持 `baseUrl` 覆盖；
 - `antigravity-cli` / `claude-cli` / `kimi-cli`：需要本机装有对应 CLI 且已登录。
 
-它自带的设置卡片会出现在 Web UI 里，也可以在建服务前用环境变量预置——dsh 子进程继承应用的环境变量：
+**配置入口是托盘的「视觉引擎（ModLens）…」**，它打开一张应用自己的设置页，由
+`modlens doctor --json` 报告的状态驱动（哪些引擎就绪、缺哪个字段、识别到哪些本机 CLI、冷却与 guard），
+保存时逐项执行 `modlens config set`，密钥只经 stdin 传递、不进命令行。改完立即生效，不需要重启。
+
+> 为什么不用插件自带的设置卡片：那张卡片注册在 dsh 的 `settings.plugin.item` 槽位里，而
+> `0.1.6-alpha.2` 把这个座位换成了特性自带的 `settings.plugins.tab`，卡片因此不再挂载
+> （插件自己的 bug，npm 上还没有跟进版本）。插件的**宿主半**不受影响：读图工具、vision provider
+> 与粘贴路由都照常注册，缺的只是配置界面。设置页因此直接驱动插件自己的命令行，不复制它的配置语义。
+>
+> 命令行等价写法：`node "<profile>/node_modules/@liustack/modlens/dist/main.js" config set <键> [值]`、
+> `… doctor --json`。配置文件是 `~/.modlens/config.json`，与那张卡片改的是同一份。
+
+也可以在建服务前用环境变量预置——dsh 子进程继承应用的环境变量：
 
 | 引擎 | key | 端点覆盖 |
 | --- | --- | --- |
@@ -457,6 +469,9 @@ Windows 安装版的等价写法：
 | `src/dsh-server.ts` | dsh 进程启动、端口选择与就绪检测 |
 | `src/dsh-profile.ts` | 内置插件写入 dsh `web` profile |
 | `src/dsh-plugins.ts` | 内置 pnpm 的解析、垫片生成与交给 dsh 的 pnpm 设置 |
+| `src/pet-overlay.ts` | 桌宠悬浮窗口（宿主） |
+| `src/modlens-cli.ts` | 视觉引擎配置驱动的插件命令行（产物解析、密钥经 stdin） |
+| `src/modlens-config.ts` | 视觉引擎设置窗口（托盘入口、IPC） |
 | `src/loading.html` | 本地服务启动和错误状态页 |
 | `scripts/` | 依赖补丁、端到端验证和把构建写进已安装客户端的工具 |
 | `test/` | dsh 服务、profile 注入和构建补丁测试 |
