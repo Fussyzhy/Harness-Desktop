@@ -9,7 +9,6 @@ import {
   waitForDshStartup
 } from "./dsh-server.js";
 import {
-  BUNDLED_LOCAL_PROFILE_PLUGINS,
   ensureWebProfilePlugins,
   quarantineProfileBundles,
   readQuarantine,
@@ -182,15 +181,14 @@ function errorMessage(error: unknown): string {
 /**
  * List this application's bundled plugins in the dsh `web` profile before the
  * service starts. A launch has no package manager to call: Electron's Node
- * runtime ships neither npm nor corepack, and the bundled pnpm is only wired up
- * for the plugin manager's own installs. Failure is never fatal — the profile is
- * an enhancement, and the service still starts on whatever dsh finds.
+ * runtime ships neither npm nor corepack, and the bundled pnpm only reaches a
+ * dsh child that this application started, for the installs a user asks for.
+ * Failure is never fatal — the profile is an enhancement, and the service still
+ * starts on whatever dsh finds.
  */
 function ensureProfilePlugins(): void {
   try {
-    const result = ensureWebProfilePlugins({
-      localAdditions: BUNDLED_LOCAL_PROFILE_PLUGINS
-    });
+    const result = ensureWebProfilePlugins();
     const detail = result.reason
       ? `${result.status} (${result.reason})`
       : result.status;
@@ -227,9 +225,7 @@ function ensureProfilePlugins(): void {
 /** The profile's third-party plugin bundles, or none when it cannot be read. */
 function thirdPartyBundles(): string[] {
   try {
-    return thirdPartyProfileBundles({
-      localAdditions: BUNDLED_LOCAL_PROFILE_PLUGINS
-    });
+    return thirdPartyProfileBundles();
   } catch (error) {
     appendLog(
       "profile",
@@ -259,8 +255,7 @@ function applySafeMode(): void {
 
   const record = quarantineProfileBundles({
     names,
-    reason: "safe-mode",
-    localAdditions: BUNDLED_LOCAL_PROFILE_PLUGINS
+    reason: "safe-mode"
   });
   if (record !== undefined) {
     // `names` is exactly what this call removed: they were read from the same
@@ -297,8 +292,7 @@ function retryWithoutOnePlugin(): boolean {
 
   const record = quarantineProfileBundles({
     names: [candidate],
-    reason: "startup-failure",
-    localAdditions: BUNDLED_LOCAL_PROFILE_PLUGINS
+    reason: "startup-failure"
   });
   if (record === undefined) {
     return false;
@@ -343,9 +337,8 @@ function restoreRecoveryAttempts(): void {
  * Tell the user which plugins a start left behind.
  *
  * The removals are persisted, so silence would look like the plugins were
- * removed by something else. Reinstalling is the path back — `dsh plugin add`
- * puts a dependency's bundle back into the layer list — and it is also the
- * request whose declared peer ranges this application now restores.
+ * removed by something else. Reinstalling is the path back: a plugin install
+ * puts a dependency's bundle back into the layer list.
  */
 async function reportDisabledPlugins(): Promise<void> {
   const incompatible = [...quarantinedThisRun];
@@ -449,13 +442,13 @@ async function reportStartupFailure(code: number | null): Promise<void> {
 }
 
 /**
- * Build the environment that lets the bundled plugin manager install plugins:
- * the pnpm shipped with this application, reached through a shim the dsh child
- * finds on `PATH`.
+ * Build the environment that lets a plugin install run: the pnpm shipped with
+ * this application, reached through a shim the dsh child finds on `PATH`,
+ * together with the pnpm settings a profile install needs.
  *
- * Failure is not fatal — the service still starts, and the plugin card reports
- * that installation is unavailable — but it is worth a log line, because the
- * only realistic cause is a broken installation.
+ * Failure is not fatal — the service still starts, and the Plugins page reports
+ * that pnpm is missing — but it is worth a log line, because the only realistic
+ * cause is a broken installation.
  */
 function resolvePluginManagerEnv(): Record<string, string> {
   if (pluginManagerEnv !== undefined) {
@@ -749,11 +742,12 @@ async function createMainWindow(): Promise<void> {
 /**
  * Start (or restart) the dsh service and load its Web UI into the window.
  *
- * Installing a plugin only takes effect at boot — a bundle joins the profile's
- * layer stack while dsh starts — so the plugin manager finishes by asking for a
- * restart, and this is the function that performs it. Every start captures a
- * generation token: one that has been superseded (by a restart, or by the user
- * quitting) stops touching shared state instead of racing the newer one.
+ * Installing a plugin that a running service cannot hot-activate only takes
+ * effect at boot — a bundle joins the profile's layer stack while dsh starts —
+ * so a start that changes the profile is followed by a restart, and this is the
+ * function that performs it. Every start captures a generation token: one that
+ * has been superseded (by a restart, or by the user quitting) stops touching
+ * shared state instead of racing the newer one.
  */
 async function startDshService(): Promise<void> {
   const generation = (dshGeneration += 1);
@@ -833,8 +827,9 @@ async function startDshService(): Promise<void> {
     }
 
     if (code === DSH_RESTART_EXIT_CODE) {
-      // The plugin manager asked for this: it answered the install request
-      // first, then exited so the new bundle can be composed at boot.
+      // A child that changed the profile's plugin layers asked for this: it
+      // answered its caller first, then exited so the new bundle can be
+      // composed at boot.
       void restartDshService("已安装的插件需要重启服务");
       return;
     }

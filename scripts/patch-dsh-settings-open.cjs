@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const SUPPORTED_VERSION = "0.1.6-alpha.1";
+const SUPPORTED_VERSION = "0.1.6-alpha.2";
 const SETTINGS_CLIENT_PACKAGE = "@deepseek-ai/dsh-client-ui-settings-general";
 const NATIVE_COMMAND_PACKAGE = "@deepseek-ai/dsh-native-command";
 

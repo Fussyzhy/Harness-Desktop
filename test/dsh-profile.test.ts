@@ -157,15 +157,17 @@ test("ensureWebProfilePlugins creates the profile from the shipped template", (t
   assert.deepEqual(readProfileManifest(result.profileDir), {
     name: "dsh-profile-web",
     private: true,
-    dependencies: {},
+    // A bundled plugin is a profile dependency as well as a layer: the official
+    // Plugins page lists a package only when the profile declares it as one, so
+    // the pin is what makes a plugin this application ships visible there.
+    dependencies: { "@liustack/modlens": "1.0.0" },
     dsh: {
       profile: {
         bundles: [
           "@deepseek-ai/dsh-base",
           "@deepseek-ai/dsh-web-app",
           "@liustack/modlens"
-        ],
-        patchReload: "live"
+        ]
       }
     }
   });
@@ -184,11 +186,12 @@ test("ensureWebProfilePlugins creates the profile from the shipped template", (t
     /nodeLinker: hoisted/
   );
   // pnpm 10.4.0 ignores `autoInstallPeers` in that workspace file, so the
-  // setting only reaches pnpm through the profile's own `.npmrc`.
-  assert.match(
-    readFileSync(path.join(result.profileDir, ".npmrc"), "utf8"),
-    /^auto-install-peers=false$/m
-  );
+  // setting only reaches pnpm through the profile's own `.npmrc` — and the same
+  // file is where the workspace-root check is turned off, since a profile is a
+  // pnpm workspace root and the plugin manager installs without asking.
+  const npmrc = readFileSync(path.join(result.profileDir, ".npmrc"), "utf8");
+  assert.match(npmrc, /^auto-install-peers=false$/m);
+  assert.match(npmrc, /^ignore-workspace-root-check=true$/m);
   // The composed row is imported by the loader from the profile directory, so
   // the plugin has to exist there — composing the layer alone is not enough.
   assert.deepEqual(result.installed, ["@liustack/modlens"]);
@@ -335,7 +338,7 @@ test("ensureWebProfilePlugins appends to an existing profile and preserves it", 
   assert.deepEqual(readProfileManifest(profileDir), {
     name: "dsh-profile-web",
     private: true,
-    dependencies: { "user-plugin": "^2.0.0" },
+    dependencies: { "user-plugin": "^2.0.0", "@liustack/modlens": "1.0.0" },
     customField: { keep: true },
     dsh: {
       profile: {
@@ -349,6 +352,44 @@ test("ensureWebProfilePlugins appends to an existing profile and preserves it", 
       }
     }
   });
+});
+
+test("a bundled plugin is pinned to the version this installation ships", (t) => {
+  const install = createScratchInstall([
+    { name: "@liustack/modlens", declaresBundle: true }
+  ]);
+  const home = createScratchHome();
+  t.after(() => {
+    rmSync(install.root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const profileDir = resolveWebProfileDir(home);
+  mkdirSync(profileDir, { recursive: true });
+  writeFileSync(
+    path.join(profileDir, "package.json"),
+    JSON.stringify({
+      name: "dsh-profile-web",
+      private: true,
+      // A copy the user pinned themselves, at a version this application does
+      // not ship.
+      dependencies: { "@liustack/modlens": "^0.9.0" },
+      dsh: { profile: { bundles: ["@deepseek-ai/dsh-base"] } }
+    })
+  );
+
+  const result = ensureWebProfilePlugins({ home, installAnchor: install.anchor });
+
+  assert.equal(result.status, "updated");
+  // The recorded version follows the copy, not the user's range: the profile
+  // copy is replaced with the shipped one, so a range that names a version the
+  // profile does not hold would describe a state that is not on disk.
+  assert.equal(
+    (readProfileManifest(profileDir).dependencies as Record<string, string>)[
+      "@liustack/modlens"
+    ],
+    "1.0.0"
+  );
 });
 
 test("ensureWebProfilePlugins writes the peer setting into a profile dsh created", (t) => {
@@ -390,7 +431,7 @@ test("ensureWebProfilePlugins writes the peer setting into a profile dsh created
   );
 });
 
-test("ensureWebProfilePlugins leaves a profile's own .npmrc alone", (t) => {
+test("ensureWebProfilePlugins adds only the settings a profile's own .npmrc lacks", (t) => {
   const install = createScratchInstall([
     { name: "@liustack/modlens", declaresBundle: true }
   ]);
@@ -410,14 +451,26 @@ test("ensureWebProfilePlugins leaves a profile's own .npmrc alone", (t) => {
       dsh: { profile: { bundles: ["@deepseek-ai/dsh-base"] } }
     })
   );
-  writeFileSync(path.join(profileDir, ".npmrc"), "strict-peer-dependencies=true\n");
+  writeFileSync(
+    path.join(profileDir, ".npmrc"),
+    "registry=https://registry.npmmirror.com\nauto-install-peers=true\n"
+  );
 
   ensureWebProfilePlugins({ home, installAnchor: install.anchor });
 
-  // The file configures the user's own pnpm; only its absence is repaired.
+  // The file configures the user's own pnpm: a setting it already carries is
+  // theirs, even when this application would have written another value, and
+  // one it lacks is appended rather than the file being rewritten.
   assert.equal(
     readFileSync(path.join(profileDir, ".npmrc"), "utf8"),
-    "strict-peer-dependencies=true\n"
+    "registry=https://registry.npmmirror.com\nauto-install-peers=true\nignore-workspace-root-check=true\n"
+  );
+
+  // A second run has nothing left to add.
+  ensureWebProfilePlugins({ home, installAnchor: install.anchor });
+  assert.equal(
+    readFileSync(path.join(profileDir, ".npmrc"), "utf8"),
+    "registry=https://registry.npmmirror.com\nauto-install-peers=true\nignore-workspace-root-check=true\n"
   );
 });
 
@@ -537,8 +590,7 @@ function createProfileWithPlugins(
   const created = ensureWebProfilePlugins({
     home,
     installAnchor: install.anchor,
-    additions: ["@liustack/modlens"],
-    localAdditions: []
+    additions: ["@liustack/modlens"]
   });
   assert.equal(created.status, "created");
 

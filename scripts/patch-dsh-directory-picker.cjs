@@ -2,7 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const PACKAGE_NAME = "@deepseek-ai/dsh-host-directory-picker-native";
-const SUPPORTED_VERSION = "0.1.6-alpha.1";
+const SUPPORTED_VERSION = "0.1.6-alpha.2";
 const WORKER_PATH = path.join(
   __dirname,
   "..",

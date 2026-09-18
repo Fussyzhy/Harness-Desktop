@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const SUPPORTED_VERSION = "0.1.6-alpha.1";
+const SUPPORTED_VERSION = "0.1.6-alpha.2";
 const OPEN_IN_APP_PACKAGE = "@deepseek-ai/dsh-host-open-in-app";
 
 /** Default dsh dependency tree: this repository's own `node_modules`. */

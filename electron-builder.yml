@@ -16,17 +16,14 @@ files:
   - src/pet-overlay-page.js
   - src/pet-overlay-preload.cjs
   - build/icon.png
-  - plugins/**/*
   - package.json
 
 # dsh loads plugins dynamically and includes native runtime modules. Keeping
-# production dependencies unpacked avoids executable and ASAR path issues.
-# `plugins/` is unpacked for the same reason: the profile copy reads it as a real
-# directory tree, and a plugin that ships two halves must arrive intact — a
-# missing client half is a boot failure, not a degraded feature.
+# production dependencies unpacked avoids executable and ASAR path issues: the
+# pnpm this application ships runs as a real file in a child process, and the
+# packages a profile install writes resolve under the same tree.
 asarUnpack:
   - node_modules/**/*
-  - plugins/**/*
 
 win:
   executableName: Harness Desktop

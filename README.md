@@ -11,7 +11,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/version-0.1.2-2563eb" alt="Version 0.1.2" />
   <img src="https://img.shields.io/badge/platform-Windows%20x64-0078d4?logo=windows11&logoColor=white" alt="Windows x64" />
-  <img src="https://img.shields.io/badge/Electron-43-47848f?logo=electron&logoColor=white" alt="Electron 43" />
+  <img src="https://img.shields.io/badge/Electron-44-47848f?logo=electron&logoColor=white" alt="Electron 44" />
   <img src="https://img.shields.io/badge/TypeScript-6-3178c6?logo=typescript&logoColor=white" alt="TypeScript 6" />
   <img src="https://img.shields.io/badge/status-early%20preview-f59e0b" alt="Early preview" />
 </p>
@@ -23,10 +23,22 @@
 ---
 
 Harness Desktop 是一个基于 TypeScript 和 Electron 的 DeepSeek Harness 桌面客户端。
-应用启动时会运行安装包内固定版本 `0.1.6-alpha.1` 的 `@deepseek-ai/dsh web`，等待本地服务就绪，
+应用启动时会运行安装包内固定版本 `0.1.6-alpha.2` 的 `@deepseek-ai/dsh web`，等待本地服务就绪，
 再将完整 Web UI 加载到桌面窗口中。
 
 > 当前项目处于早期预览阶段，重点是提供稳定、可运行、可分发的 Windows 桌面体验。
+
+> **升级 dsh 时必须同时确认 Electron 版本。** 从 `0.1.6-alpha.2` 起，dsh 启动时会给 Node 的
+> ESM/CJS 解析器装一层 profile 级回退（`@deepseek-ai/dsh-app-boot` 的
+> `installProfileResolution`），它通过原生插件 `node-addon-require-builtin` 读取
+> `internal/modules/*`。该二进制按**运行时指纹**放行，只认它验证过的那几个 Electron 版本：
+> `0.1.6-alpha.2` 的清单是 `43.0.0 / 44.0.0 / 45.0.0-alpha.6`。Electron `43.4.0`
+> （Node 24.18.1 / V8 15.0.245.28）不在清单内，启动会在绑定端口之前就以
+> `Unsupported/no-context` 失败——现象是应用完全打不开，所以本项目把 `electron` 锁在清单内的
+> `44.0.0`。**换 dsh 版本时先看新版的放行清单，再挑一个清单内的精确版本**。验证方法：跑
+> `yarn smoke:boot`——它在临时 `DSH_HOME` 里按 `src/main.ts` 的方式建好 profile、用仓库锁定的
+> Electron 起一次 `dsh web`，能打印出 `dsh web: http://…` 并探测到 HTTP 响应才算通过；不碰你的
+> `~/.dsh`，也不起第二个 GUI 窗口。
 
 ## 当前能力
 
@@ -39,7 +51,7 @@ Harness Desktop 是一个基于 TypeScript 和 Electron 的 DeepSeek Harness 桌
 - **安全导航**：应用外链接交给系统默认浏览器打开
 - **错误诊断**：启动失败或服务意外退出时直接展示相关日志
 - **插件预置**：内置 modlens 视觉插件，首次启动自动挂载，无需用户安装
-- **插件自助安装**：Web UI 设置页内置插件管理卡片，可直接安装、更新、卸载 npm 上的 dsh 插件
+- **插件自助安装**：Web UI 侧边栏的官方 **Plugins** 页面可直接安装、更新、卸载 npm 上的 dsh 插件——应用替它准备好了 pnpm 与所需的 pnpm 设置
 - **Windows 安装器**：通过 NSIS 生成可选择安装目录的 x64 安装包
 
 ## 安装使用
@@ -75,7 +87,8 @@ npm start
 | `yarn package:dir` | 生成用于快速验证的未安装应用目录 |
 | `yarn package:win` | 生成 Windows x64 NSIS 安装包 |
 | `yarn patch:app` | 把当前 `dist/` 写进已安装客户端的 `app.asar`，免去重新打包安装 |
-| `yarn verify:plugins` | 在临时 `DSH_HOME` 里端到端验证插件安装链路（不起第二个 GUI，不动你的 `~/.dsh`）；加 `VERIFY_VERBOSE=1` 可透传 dsh 与 pnpm 的原始输出 |
+| `yarn verify:plugins` | 在临时 `DSH_HOME` 里端到端验证插件安装链路：用应用准备的 pnpm 环境走官方安装路径装一个注册表包，校验 profile 的依赖与 bundle 层，再用它起一次服务（不起 GUI，不动你的 `~/.dsh`）；加 `VERIFY_VERBOSE=1` 可透传 dsh 与 pnpm 的原始输出，`--spec <包名>` 可换目标包 |
+| `yarn smoke:boot` | 在临时 `DSH_HOME` 里用仓库锁定的 Electron 真起一次 `dsh web`，验证 dsh 版本与 Electron 运行时确实能启动
 
 ## 构建安装包
 
@@ -161,15 +174,14 @@ dsh 依赖里对应的位置，每个补丁都锁定 dsh 版本，且在当前�
 | `patch-dsh-settings-open.cjs` | 打开设置文档时异常被吞掉、按钮卡住 |
 | `patch-dsh-open-in-app.cjs` | “在本地打开”无法启动 VS Code 等 Electron 应用 |
 | `patch-dsh-win32-process-console-window.cjs` | agent 每执行一条命令都会弹出黑色控制台窗口 |
-| `patch-dsh-plugin-console-window.cjs` | 安装插件时反弹出黑色控制台窗口 |
 
-最后一个补丁修的是：被启动的桌面程序从 dsh 继承了 `ELECTRON_RUN_AS_NODE=1`，于是 VS Code、
+`patch-dsh-open-in-app.cjs` 修的是：被启动的桌面程序从 dsh 继承了 `ELECTRON_RUN_AS_NODE=1`，于是 VS Code、
 VS Code Insiders、Cursor、Windsurf 这些 Electron 程序被当成 Node 进程启动，几十毫秒内就带着
 `node:internal/modules/cjs/loader` 错误退出，界面显示“打开失败”。补丁只从**被启动的桌面程序**
 继承的环境里去掉这个变量（资源管理器、Git Bash 不受影响，GitHub Desktop 自己声明的仍保留）。
 
-控制台窗口补丁修的是：本应用把 dsh 跑在 Electron 里，Electron 主进程和它启动的 Job runner 都是
-GUI 子系统进程、**都没有控制台**（`windowsHide` 只对控制台子系统程序生效，对它们无效）。runner
+`patch-dsh-win32-process-console-window.cjs` 修的是：本应用把 dsh 跑在 Electron 里，Electron 主进程和它
+启动的 Job runner 都是 GUI 子系统进程、**都没有控制台**（`windowsHide` 只对控制台子系统程序生效，对它们无效）。runner
 用 `CreateProcessW` 创建真正的命令进程，而目标 pwsh 是控制台子系统程序、父进程又没有控制台，
 Windows 于是给它**新建一个自己的可见控制台**——每条命令一个黑框，一直留到命令结束。补丁给这次
 创建的 creation flags 加上 `CREATE_NO_WINDOW`（0x08000000），目标进程不再有可见控制台，stdio
@@ -177,11 +189,17 @@ Windows 于是给它**新建一个自己的可见控制台**——每条命令�
 令牌沙箱的 `CreateProcessAsUserW` 路径**不能**加这个标志（受限进程会在 DLL 初始化阶段以
 `STATUS_DLL_INIT_FAILED` 0xC0000142 死亡，见 dsh-sandbox-windows-acl 的说明），保持原样。
 
-插件补丁修的是同一类问题的另一条路径：`dsh plugin` 是 pnpm 转发器，它用
-`spawnSync("pnpm", …, { shell: process.platform === "win32" })` 起命令。父进程没有控制台，
-`shell: true` 起的 `cmd.exe` 因此又给自己新建一个可见控制台。补丁只给这一次 `spawnSync` 加上
-`windowsHide: true`（→ `CREATE_NO_WINDOW`），`stdio: "inherit"` 与退出码不变。该文件是
-`lib/plugin-<hash>.js`，名字随版本变化，所以补丁按目录扫描定位，并要求恰好命中一个。
+### 已经退役的补丁：安装插件时的黑色控制台窗口
+
+`0.1.6-alpha.1` 上的第五个补丁 `patch-dsh-plugin-console-window.cjs` 修的是：`dsh plugin` 当时自己就是
+pnpm 转发器，它用 `spawnSync("pnpm", …, { shell: process.platform === "win32" })` 起命令，父进程没有
+控制台，`shell: true` 起的 `cmd.exe` 因此又给自己新建一个可见控制台。
+
+`0.1.6-alpha.2` 把包管理搬进了新的官方包 `@deepseek-ai/dsh-plugin-manager`：`dsh plugin` 只调
+`runPluginCommand`，真正的 pnpm 由该包用 `execa` 启动。execa 的 `addDefaultOptions` 把 `windowsHide`
+默认成 `true`，并且自己解析 `pnpm.cmd` 后用 `cmd.exe /d /s /c` 执行（不用 `shell: true`），所以那个
+黑框由上游自己消失了。补丁已删除，`test/dsh-plugin-manager-console-window.test.ts` 改为守住这条
+结论：上游若又改回“自己 spawn”或显式让窗口可见，测试会先失败并提示把补丁请回来。
 
 已安装的客户端也可以就地修好，不必重新打包——它的依赖就在 `app.asar.unpacked` 里：
 
@@ -229,30 +247,39 @@ Harness Desktop
 不带 npm/corepack。用户自助安装因此由[用户自己安装的插件](#用户自己安装的插件)那套内置 pnpm 垫片
 完成；本节说的是随应用发布、用户无需安装的预置插件。
 
-### 两步缺一不可
+### 三步缺一不可
 
-预置一个插件要同时做两件事，少任何一件都装不上：
+预置一个插件要同时做三件事，少任何一件都不完整：
 
 1. **列进 `dsh.profile.bundles`**——dsh 据此组合插件自带的 patch 层。这一步读的是应用安装目录，
    所以插件放在本应用的依赖里就能被解析到。
 2. **复制到 `<profile>/node_modules/`**——组合出来的插件条目最终由 Loader 从 profile 目录 import。
    dsh 的两套模块回退都指望不上第三方插件：`$DSH_HOME/profiles/node_modules` 只镜像 dsh
    自己的依赖闭包，而 profile 内的链接投影会刻意跳过每个 bundle 自身。
+3. **以精确版本写进 profile 的 `dependencies`**——这一步不影响能不能启动，但决定它在官方
+   **Plugins** 页面里是否可见：那一页只列出「profile 声明为依赖的包 + 本 dsh 安装以 optional 提供的
+   bundle + 有问题的 bundle」，只出现在 `dsh.profile.bundles` 里的层会被过滤掉。版本取自应用实际
+   发布的那个副本，所以记录与磁盘上的内容一致。
 
 第 2 步复刻了 `dsh plugin add` 最终留下的布局（profile 的 `pnpm-workspace.yaml` 要求的正是
 `nodeLinker: hoisted` 扁平结构），也是不依赖 pnpm 就能生效的原因。复制只在版本不一致时发生，
 因此后续启动只多一次 manifest 读取。若同名的包已存在且版本一致（例如用户自己装过同一个版本），
-则原样保留；版本不同时会被本应用内置的版本覆盖。
+则原样保留；版本不同时会被本应用内置的版本覆盖，第 3 步的记录也随之改成本应用发布的版本。
+
+> 代价说清楚：内置插件在官方 Plugins 页面上是可卸载、可停用的普通插件。你在那里卸载或停用它，
+> **下次启动会被本应用恢复**——它每次启动都重新确保这些层和依赖存在。要永久去掉内置插件，改
+> `src/dsh-profile.ts` 的 `BUNDLED_PROFILE_PLUGINS` 重新构建，而不是在页面里卸载。
 
 ### 新增一个内置插件
 
 1. 把包加进 `package.json` 的 `dependencies`，**精确锁定版本**（不要用 `^`）。
 2. 把包名加进 `src/dsh-profile.ts` 的 `BUNDLED_PROFILE_PLUGINS`。
-3. 运行 `yarn test`：测试会校验每个内置插件都已被声明为精确锁定的依赖。
+3. 运行 `yarn test`：测试会校验每个内置插件都已被声明为精确锁定的依赖，以及 profile 里的 pin
+   用的是这个版本。
 
-**改了插件内容就要同时升它的 `version`**（例如 `plugins/dsh-plugin-manager/package.json`）：profile
-里的副本是按版本号判断是否需要刷新的（`src/dsh-profile.ts` 的 `ensureWebProfilePlugins`），版本没变
-就原地保留旧副本，改动静默地到不了用户机器——只在源码里改一行、忘了升版本，重启也不会有任何变化。
+**升版本才会刷新 profile 里的副本**：profile 里的副本是按版本号判断是否需要刷新的
+（`src/dsh-profile.ts` 的 `ensureWebProfilePlugins`），版本没变就原地保留旧副本。所以内置插件的
+更新就是改 `dependencies` 里那个精确版本号；只改本地源码而不升版本，改动静默地到不了用户机器。
 
 ### 生效条件
 
@@ -291,62 +318,64 @@ node "$dshHome\profiles\web\node_modules\@liustack\modlens\dist\main.js" doctor 
 
 ### 用户自己安装的插件
 
-Web UI 设置页的 Plugins 里有一张**插件管理**卡片，可以安装、更新、卸载 dsh 插件。
+安装入口是 Web UI 侧边栏的官方 **Plugins** 页面，安装、更新、卸载、启用/停用都在那里。
+`0.1.6-alpha.2` 起 `dsh-base` 会挂载官方 `@deepseek-ai/dsh-plugin-manager`（提供 `pluginManager`
+Remote、agent 工具行与侧边栏页面），设置页里还有一个只读的插件清单标签。应用不再自带插件管理器。
 
-打包后的应用既没有 npm 也没有 corepack，PATH 上更没有 `pnpm`，而 `dsh plugin` 只是一个 pnpm
-转发器，所以本应用把 **pnpm 10.4.0**（纯 JS，精确锁版本）放进自己的依赖，在用户数据目录写一个
-`pnpm` 垫片（Windows 下是 `pnpm.cmd`），启动 dsh 子进程时把该目录放在 `PATH` 最前面，并通过环境
-变量把 pnpm、dsh CLI 与 store 路径交给内置的 `@harness-desktop/dsh-plugin-manager` 插件。安装因此
-走的是官方命令：
+应用要做的事只有一件：让这套官方实现在这个既没有 npm、也没有 corepack、PATH 上更没有 `pnpm` 的
+安装包里既能找到 pnpm，也能把插件装上。因此有三件准备工作：
 
-```text
-dsh plugin --profile web add --workspace-root <包名> --store-dir <DSH_HOME>/.pnpm-store
-```
+1. **自带 pnpm 10.4.0**（纯 JS，精确锁版本）放进依赖，并在用户数据目录写一个 `pnpm` 垫片
+   （Windows 下是 `pnpm.cmd`），启动 dsh 子进程时把该目录放在 `PATH` 最前面——官方管理器同样只是
+   `execa("pnpm", …)`，打包后的应用 PATH 上没有 pnpm。
+2. **给 dsh 子进程带上 pnpm 设置**（`src/dsh-plugins.ts` 的 `PNPM_CONFIG_ENV`）。官方管理器用
+   `scrubbedParentEnv()` 起 pnpm，它只清 `DSH_*` 与形如 `KEY/PASSWORD/SECRET/TOKEN` 的名字，
+   `npm_config_*` 会被继承：
+   - `auto-install-peers=false`
+   - `ignore-workspace-root-check=true`
+   - `npm_config_store_dir=<DSH_HOME>/.pnpm-store`
+3. **同一份设置也写进 profile 的 `.npmrc`**，覆盖绕过应用的入口（终端里手敲 `dsh plugin …`）。
+   已有文件只补缺失的键：你自己写的 registry 等设置不会被改写。
 
-`--workspace-root` 不是可选项：profile 的 `pnpm-workspace.yaml` 由 dsh 模板生成，里面是
-`packages: - .`，pnpm 因此把 profile 当作工作区根，而**往工作区根添加注册表依赖必须显式声明**，
-否则报 `ERR_PNPM_ADDING_TO_ROOT`。`dsh plugin` 把参数原样转发给 pnpm，所以这个 flag 只能由调用方
-给出（卡片与 `src/dsh-plugins.ts` 的 `buildDshPluginArguments` 都已带上）。本地目录与 `link:` 规格
-不受这条检查约束，这也是只装本地探针插件的端到端脚本抓不到该问题的原因。
+为什么必须关掉工作区根检查：profile 的 `pnpm-workspace.yaml` 由 dsh 模板生成，里面是 `packages: - .`，
+pnpm 因此把 profile 当作工作区根，而**往工作区根添加注册表依赖必须显式声明**，否则报
+`ERR_PNPM_ADDING_TO_ROOT`。官方管理器的安装路径是 `execa("pnpm", ["add", <spec>])`，它不传
+`--workspace-root`——上游留的注入点（`ProfilePnpmInvocation.args`）只有编程式 `runProfile` 的
+`packageManager` 选项能用到，`dsh` 命令行不会传。所以在配置层把这个检查关掉，是不改上游代码的唯一
+做法，而且它不区分pnpm 子命令，`remove`、`view` 这些走同一条转发的操作都不受影响
+（`--workspace-root` 对 `view` 是未知参数）。本地目录与 `link:` 规格不受这条检查约束，这也是只装本地
+探针插件的端到端脚本抓不到该问题的原因。
 
 profile 的初始化、pnpm 转发、以及按**已安装状态**回填 `dsh.profile.bundles` 都由 dsh 自己完成，
-所以别名、tarball、本地目录、git 地址、传递依赖与版本冲突的行为和命令行完全一致。
-
-输入框接受 npm 上常见的写法：
-
-| 写法 | 例子 |
-| --- | --- |
-| 包名（含 scope） | `@liustack/modlens` |
-| 指定版本 | `@liustack/modlens@3.26.0` |
-| 本地目录或 tarball | `file:C:/plugins/my-plugin`、`file:C:/plugins/my-plugin-1.0.0.tgz` |
-| git | `github:user/repo` |
-| 本地副本 | `@deepseek-ai/dsh-tools@link:C:/app/node_modules/@deepseek-ai/dsh-tools` |
-
-一次可以给**多个规格**（空格或逗号分隔），它们会作为多个参数交给同一次 `pnpm` 调用——下面那条
-peer 依赖的坑就靠这个绕过。每个规格单独校验：不能以 `-` 开头（否则就是在注入 flag）、不能含空格、
-不超过 200 字符，所以路径里带空格的规格目前输入不了。
+所以别名、tarball、本地目录、git 地址、传递依赖与版本冲突的行为和命令行完全一致。安装输入接受
+npm 上常见的写法：包名（含 scope）、`@版本`、`file:C:/plugins/my-plugin`（目录或 `.tgz`）、
+`github:user/repo`、`link:<应用目录>/node_modules/<包>`。
 
 几条要记住的规则：
 
-- **装完要重启服务才生效**：`dsh.profile.bundles` 只在启动时读一次，`patchReload: live` 只监听
-  patch 文件。安装成功后卡片会给出"立即重启"，由桌面外壳重启 dsh 子进程并用新的认证 URL 重载窗口
+- **新装的插件会被热激活，通常不用重启**：官方安装成功后会重新组合 profile 层（`hmr` 行，
+  `root: []`）。只有当这个包**本来就已经是依赖**时才返回 `restart-required`，那就按界面提示重启。
+  桌面外壳也认这条旧约定：dsh 子进程以退出码 77 退出时，它会重启服务并用新的认证 URL 重载窗口
   （该 URL 每次启动都带新 token）。
-- **内置插件不会被用户操作删掉**：应用管理的插件（modlens 和插件管理本身）不以依赖形式存在，
-  `dsh plugin remove` 不会碰它们，卡片会把它们标成"内置"。反过来，自己安装同名包（例如另一个
-  版本的 modlens）不会生效：bundle 的 patch 层永远从应用安装目录解析，两版并存会混用一版的
-  patch 和另一版的代码，所以应用启动时会把 profile 里的副本恢复成随应用发布的版本并打印日志。
-- **依赖的构建脚本默认被 pnpm 阻止**：**以卡片打印的报错为准**。本应用内置的是 pnpm 10.4.0，它的
-  提示是 `Ignored build scripts: <包名>. Run "pnpm approve-builds" …`，放行键是
-  `pnpm-workspace.yaml` 里的 `onlyBuiltDependencies`（dsh 自己的提示文案写的是 `allowBuilds`，那是
-  更新版 pnpm 的键名，这个版本不认）。把提示里点名的包写进去再重试即可。
+- **内置插件会出现在官方页面上，但卸载/停用它不生效**：modlens 既是 profile 的层，也是一个精确
+  锁版本的 profile 依赖，所以官方 Plugins 页面会把它当成普通已安装插件列出，并允许卸载或停用。
+  这两件事都会在下次启动时被本应用恢复（它每次启动都重新确保这些层与依赖存在）。反过来，自己
+  安装同名包（例如另一个版本的 modlens）不会生效：bundle 的 patch 层永远从应用安装目录解析，两版
+  并存会混用一版的 patch 和另一版的代码，所以应用启动时会把 profile 里的副本恢复成随应用发布的
+  版本并把记录改回该版本，同时打印日志。
+- **依赖的构建脚本默认被 pnpm 阻止，而官方页面的"放行"按钮对 pnpm 10 无效**：官方管理器把放行写进
+  `pnpm-workspace.yaml` 的 `allowBuilds`（其代码注释写明是给 pnpm 11 读的键），而 10.4.0 只认
+  `onlyBuiltDependencies`。所以遇到需要构建脚本的插件时，**以 pnpm 打印的报错为准**：它的提示是
+  `Ignored build scripts: <包名>. Run "pnpm approve-builds" …`，把点名的包写进
+  `$DSH_HOME/profiles/web/pnpm-workspace.yaml` 的 `onlyBuiltDependencies` 再重试。
 - **peer 依赖不会由 pnpm 去注册表补装**：过去插件只要声明 peer（写 `*` 的最常见），pnpm 就会按
   `latest` dist-tag 把缺失的 peer 装进 profile，而 dsh 框架包的 `latest` 至今指向最老的
   `0.0.1-rc.1`：那一支的 peer 里含有**从未发布**的 `@deepseek-ai/dsh-type-meta`
   （`dsh-session@0.0.1-rc.1`、`dsh-agent@0.0.1-rc.1` 都声明了它），于是 pnpm 报
   `ERR_PNPM_FETCH_404 … dsh-type-meta`（换成任何一个被改名或下架的包同样如此）并放弃整次安装——
   插件根本没机会被装进去。这与 profile 的内容无关：空目录里
-  `pnpm add @deepseek-ai/dsh-tools@0.0.1-rc.1` 同样复现，而 `dsh-tools@0.1.6-alpha.1`（应用自带的
-  那版）的 peer 是已发布的 `^0.1.6-alpha.1` 家族，一路干净。
+  `pnpm add @deepseek-ai/dsh-tools@0.0.1-rc.1` 同样复现，而 `dsh-tools@0.1.6-alpha.2`（应用自带的
+  那版）的 peer 是已发布的 `^0.1.6-alpha.2` 家族，一路干净。
 
   本应用因此在两个层面关掉了 peer 自动补装，这类安装不会再失败：profile 里写入 `.npmrc`
   （`auto-install-peers=false`——dsh 模板写在 `pnpm-workspace.yaml` 里的 `autoInstallPeers`，这个版本
@@ -356,32 +385,32 @@ peer 依赖的坑就靠这个绕过。每个规格单独校验：不能以 `-` �
   依赖闭包，插件宿主半 import 的框架包（`@deepseek-ai/cordis`、`dsh-tools`、`dsh-settings` …）
   正是从这里解析，版本与应用一致。但这只保证**解析得到**，不保证**接口还在**：插件若 import 了应用
   这一线已经删掉的导出（本机案例：`@deepseek-ai/dsh-settings` 早先的 `settingsNamespace`），
-  组合或链接阶段就会失败，表现是 dsh 根本起不来，而不是少一个功能。下一条的安装期回填与
+  组合或链接阶段就会失败，表现是 dsh 根本起不来，而不是少一个功能。
   [启动自愈与安全模式](#启动自愈与安全模式)就是为这一类插件准备的。
-- **不兼容的 peer 由安装者按插件声明的范围回填**：安装成功后，插件管理插件会重读该插件的
-  `peerDependencies`，逐个解析实际落到的版本；凡是"缺失"或"不满足声明范围"的，就用**插件自己声明的
-  范围**再补一次 `pnpm add`（例如 `dsh-live2d-pets` 声明的 `@deepseek-ai/dsh-settings@^0.1.0-rc.6`）。
-  于是解析到的是插件作者验证过的那一支，而不是注册表上的 `latest`。范围写 `*` 或空的一律跳过
-  （`*` 就是 `latest`，正是上一条坑的来源），声明为 `optional` 的 peer 不补，超出支持语法的 range
-  （例如 `1.2.3 - 2.0.0`）也不补——宁可让它按原样失败，也不按猜测去装。补装了哪些规格会打印在卡片
-  输出里。判断只针对插件宿主半真正会 import 的框架包，且只在这一步失败时才有影响。
-- **仍然需要手写规格的情形**：插件在**宿主半**（Node 侧）import 了一个只在浏览器侧存在的包
+- **安装期不再按插件声明的范围回填 peer**：本应用早先自带的插件管理器会在安装成功后重读插件的
+  `peerDependencies`，用插件自己声明的范围再补一次 `pnpm add`（例如 `dsh-live2d-pets` 声明的
+  `@deepseek-ai/dsh-settings@^0.1.0-rc.6`），官方管理器不做这件事。影响面：框架 peer 仍由
+  `$DSH_HOME/profiles/node_modules` 提供，日常多数插件照常可用；插件若声明了**非框架** peer，
+  需要你自己补。
+- **需要手写规格的情形**：插件在**宿主半**（Node 侧）import 了一个只在浏览器侧存在的包
   （例如 `react`）——这类包在 `$DSH_HOME/profiles/node_modules` 里是空链接，它们由浏览器半的模块表
-  提供、不在 Node 侧解析；或者你要用 `link:` 指到应用自带的那一份。写法仍是同一行给多个规格
-  （空格或逗号分隔）：
+  提供、不在 Node 侧解析；或者你要用 `link:` 指到应用自带的那一份。官方页面的安装输入要一次给一个
+  规格，逐条装即可：
 
   ```text
-  @hellosz/dsh-pets  react@<该插件 peer 要求的版本>
-  @hellosz/dsh-pets  @deepseek-ai/dsh-tools@link:<应用目录>/node_modules/@deepseek-ai/dsh-tools
+  @hellosz/dsh-pets
+  react@<该插件 peer 要求的版本>
+  @deepseek-ai/dsh-tools@link:<应用目录>/node_modules/@deepseek-ai/dsh-tools
   ```
 
-  第二行的 `link:` 形式保证永远与应用内置的那份同版本、且不额外下载，代价是 profile 里记下一个
-  本机绝对路径（应用换了安装目录就要重新装一次）。命令行等价写法是
-  `dsh plugin --profile web add --workspace-root <上面两个规格> --store-dir <DSH_HOME>/.pnpm-store`。
+  `link:` 形式保证永远与应用内置的那份同版本、且不额外下载，代价是 profile 里记下一个本机绝对路径
+  （应用换了安装目录就要重新装一次）。命令行等价写法是
+  `dsh plugin --profile web add <规格>`（在应用之外执行时，先确保 PATH 上有 pnpm）。
   额外装的包若不声明 `dsh.bundle`，只会作为普通依赖落进 profile 的 `dependencies`
   （dsh 会打印一条相应提示），不影响插件层。
 - **镜像源**：pnpm 读它自己的配置，在 `<profile>/.npmrc` 或 `~/.npmrc` 里写 `registry=`
-  即可（例如 `https://registry.npmmirror.com`）。注意 `yarn dev` 起的环境里，yarn 会把自己的
+  即可（例如 `https://registry.npmmirror.com`）。应用只在 profile 的 `.npmrc` 里**补**它自己要用的
+  两个键，你写的 registry 不会被改写。注意 `yarn dev` 起的环境里，yarn 会把自己的
   `npm_config_registry` 传给子进程（本机实测是 `http://registry.npmmirror.com`，磁盘上并没有任何
   `.npmrc`），而打包后的应用没有这层环境变量，默认走官方 npmjs——两条路的安装行为都验证过。
 - **插件就是任意代码**：安装一个插件等于让它在 dsh 进程里运行，只安装你信任的包。
@@ -415,11 +444,10 @@ Windows 安装版的等价写法：
 ```
 
 停用与恢复只改 `dsh.profile.bundles` 和那个记录文件，不动 profile 的 `dependencies`；应用管理的层
-（`@deepseek-ai/dsh-base`、`@deepseek-ai/dsh-web-app`、modlens 与插件管理本身）永远不会被摘掉。
+（`@deepseek-ai/dsh-base`、`@deepseek-ai/dsh-web-app` 与 modlens）永远不会被摘掉。
 
-回填只发生在**某次安装成功之后**，因此升级到带这套机制的应用后，profile 里已经装好的旧插件不会自己
-被修：它们要么在下次启动时被自愈停用（弹窗会说明），要么由你在插件管理卡片里**重新安装一次**触发
-回填，之后就能正常启动。
+自愈与安全模式只做一件事：把整层从 `dsh.profile.bundles` 里摘掉。它**不会**替你去改那个插件的依赖
+或 peer——嫌麻烦就重新装一次，或按上面那条自己补上缺的非框架 peer。
 
 ## 项目结构
 
@@ -428,28 +456,11 @@ Windows 安装版的等价写法：
 | `src/main.ts` | Electron 主进程与窗口生命周期 |
 | `src/dsh-server.ts` | dsh 进程启动、端口选择与就绪检测 |
 | `src/dsh-profile.ts` | 内置插件写入 dsh `web` profile |
-| `src/dsh-plugins.ts` | 内置 pnpm 的解析、垫片生成与 `dsh plugin` 调用 |
+| `src/dsh-plugins.ts` | 内置 pnpm 的解析、垫片生成与交给 dsh 的 pnpm 设置 |
 | `src/loading.html` | 本地服务启动和错误状态页 |
-| `plugins/dsh-plugin-manager/` | 插件管理插件本体（宿主半 + 浏览器半，随应用打包进 profile） |
-| `scripts/` | 依赖补丁和把构建写进已安装客户端的工具 |
+| `scripts/` | 依赖补丁、端到端验证和把构建写进已安装客户端的工具 |
 | `test/` | dsh 服务、profile 注入和构建补丁测试 |
 | `build/icon.png` | 应用、Loading、安装器和快捷方式图标 |
 | `electron-builder.yml` | Windows 安装包配置 |
 | `dist/` | TypeScript 编译输出，不提交版本控制 |
 | `release/` | 打包输出，不提交版本控制 |
-
-## 插件管理插件的契约
-
-`plugins/dsh-plugin-manager/` 是随应用打包的 dsh 双半插件，dsh 对它有硬性要求，改动前请先看
-`test/dsh-plugin-manager.test.ts`（这些测试就是按下面的规则写的）：
-
-- `package.json` 必须同时给出 `dsh.bundle.patch`、`exports["."]` 和 `exports["./client"]`，
-  且三个文件都要真的存在——声明了 `dsh.client` 却没有客户端半会让 **dsh 整个启动失败**；
-- 浏览器半是**经典脚本**，必须是 `window.__ModuleLoader__.load({ id, factory })` 的单文件形态，
-  注册的 `id` 必须等于包名，裸包名只能 require 外壳提供的模块表（本插件只用 `react`）；
-- 卡片的 `key` 必须等于宿主半通过 `settings.register` 注册的命名空间，否则卡片永不被派发；
-- 宿主半只读 `HARNESS_DESKTOP_*` 环境变量（见 `src/dsh-plugins.ts` 的
-  `PLUGIN_MANAGER_ENV_KEYS`），在应用之外启动时会明确报"无法安装"而不是静默失败。
-- 写操作是 `POST { action: "add" | "remove" | "update" | "restart", spec }`。`spec` 里可以有多个
-  规格（空格或逗号分隔，`update` 允许为空表示全部更新），**每个规格单独**校验：不以 `-` 开头、
-  不含空格、不超过 200 字符——这样才能既支持"插件 + peer link"一起装，又不让 flag 混进 pnpm 参数。

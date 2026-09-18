@@ -1,59 +1,37 @@
-import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { WEB_PROFILE_NAME, resolveDshHome } from "./dsh-profile.js";
-import { resolveAsarUnpackedPath, resolveDshCliPath } from "./dsh-server.js";
+import { resolveDshHome } from "./dsh-profile.js";
+import { resolveAsarUnpackedPath } from "./dsh-server.js";
 
 /**
  * Installing a plugin is the one thing this application cannot do on its own:
- * `dsh plugin` is a thin pnpm forwarder, and neither npm nor corepack — let
- * alone a `pnpm` on PATH — exists on a user's machine. The pieces here make the
- * official `dsh plugin` command runnable inside a packaged build:
+ * dsh's plugin manager is a thin pnpm forwarder, and neither npm nor corepack —
+ * let alone a `pnpm` on PATH — exists on a user's machine. The pieces here make
+ * that forwarder runnable inside a packaged build:
  *
  * 1. resolve the pnpm shipped in this application's dependencies,
  * 2. write a `pnpm` shim (Windows: `pnpm.cmd`) that starts it on Electron's
  *    Node runtime, and
- * 3. hand the bundled plugin manager the environment it needs to call that
- *    shim, so the work itself stays upstream's (`initProfile` + pnpm +
- *    `dsh.profile.bundles` reconciliation).
+ * 3. hand the dsh child the environment that puts that shim on `PATH` together
+ *    with the pnpm settings a profile install needs.
  *
  * Nothing here touches the network or the profile: it only prepares paths.
  */
 
 /**
- * Exit code the dsh child uses to ask the desktop shell for a clean restart.
+ * Exit code a dsh child uses to ask the desktop shell for a clean restart.
  *
- * A plugin only becomes a profile layer when the dsh process starts, so the
- * plugin manager cannot finish its job by itself. It responds to the install
- * request first and then exits with this code; the shell restarts the service
- * instead of showing the "unexpected exit" error page.
+ * A new bundle only becomes a profile layer when the dsh process starts, so a
+ * child that changed one answers its caller first and then exits with this code;
+ * the shell restarts the service instead of showing the "unexpected exit" error
+ * page.
  */
 export const DSH_RESTART_EXIT_CODE = 77;
 
 /**
- * Environment keys the shell passes to the dsh child. The bundled plugin
- * manager reads them and falls back to clear errors when it runs outside this
- * application (a plain `dsh` on PATH has no bundled pnpm to call).
- */
-export const PLUGIN_MANAGER_ENV_KEYS = {
-  /** Absolute path of pnpm's CLI entry (`pnpm/bin/pnpm.cjs`). */
-  pnpmScript: "HARNESS_DESKTOP_PNPM_SCRIPT",
-  /** Absolute path of `@deepseek-ai/dsh`'s CLI entry (`lib/bin.js`). */
-  dshCli: "HARNESS_DESKTOP_DSH_CLI",
-  /** Electron executable that runs both of the above as Node. */
-  electron: "HARNESS_DESKTOP_ELECTRON",
-  /** Content-addressed pnpm store, kept inside the dsh home. */
-  storeDir: "HARNESS_DESKTOP_PNPM_STORE_DIR",
-  /** Directory holding the `pnpm` shim, prepended to `PATH`. */
-  shimDir: "HARNESS_DESKTOP_PNPM_SHIM_DIR",
-  /** Restart handshake; mirrors {@link DSH_RESTART_EXIT_CODE}. */
-  restartExitCode: "HARNESS_DESKTOP_RESTART_EXIT_CODE"
-} as const;
-
-/**
- * pnpm configuration the shell adds to the dsh child's environment, which
- * `dsh plugin` hands on to pnpm by inheritance.
+ * pnpm configuration the shell adds to the dsh child's environment, which dsh's
+ * plugin manager hands on to pnpm by inheritance.
  *
  * `auto-install-peers=false` is the setting dsh's own profile template asks for
  * in `pnpm-workspace.yaml`, repeated here because that is not a file pnpm reads
@@ -66,22 +44,34 @@ export const PLUGIN_MANAGER_ENV_KEYS = {
  * fails with `ERR_PNPM_FETCH_404` before it adds anything. Those peers are
  * provided by the running installation, so pnpm must not look for them.
  *
- * The profile carries the same setting in its own `.npmrc`; this copy is what
- * makes it effective for a profile this application does not manage.
+ * `ignore-workspace-root-check=true` answers a different refusal: every profile
+ * is a pnpm workspace root (its `pnpm-workspace.yaml` lists `packages: - .`),
+ * and pnpm adds a *registry* package to a workspace root only when it is asked
+ * to explicitly. The official plugin manager runs `pnpm add <spec>` with no
+ * such flag, so without this setting every install from a registry fails with
+ * `ERR_PNPM_ADDING_TO_ROOT`. Only a local, `link:`, or `file:` spec is exempt —
+ * which is why an install of a local probe never met the rule. The switch is
+ * turned off here rather than by patching the upstream command line, which is
+ * shared with `remove` and `view`, where `--workspace-root` means nothing.
+ *
+ * This environment is the lever that reaches every profile, including ones this
+ * application does not prepare: the manager runs pnpm with
+ * `scrubbedParentEnv()`, which strips only `DSH_*` and names matching
+ * `/KEY|PASSWORD|SECRET|TOKEN/i`, so `npm_config_*` survives. The profile's own
+ * `.npmrc` carries the same two settings for a pnpm that never sees this
+ * environment (a `dsh plugin` typed into a terminal).
  */
 export const PNPM_CONFIG_ENV: Readonly<Record<string, string>> = {
-  "npm_config_auto_install_peers": "false"
+  "npm_config_auto_install_peers": "false",
+  "npm_config_ignore_workspace_root_check": "true"
 };
-
-/** What `dsh plugin` may be asked to do with the `web` profile. */
-export type DshPluginAction = "add" | "remove" | "update";
 
 /** A `require` function, narrowed for testability. */
 export interface RequireLike {
   resolve: (id: string) => string;
 }
 
-/** Environment and paths handed to the bundled plugin manager. */
+/** Environment and paths handed to the dsh child process. */
 export interface PluginManagerEnvironment {
   /** Extra environment for the dsh child process. */
   env: Record<string, string>;
@@ -98,8 +88,6 @@ export interface PreparePluginManagerOptions {
   userDataDir: string;
   /** Executable that runs pnpm as Node; defaults to the current process. */
   electronPath?: string;
-  /** dsh CLI entry; defaults to the installed package's. */
-  dshCliPath?: string;
   /** pnpm CLI entry; defaults to the bundled package's. */
   pnpmScript?: string;
   /** dsh home holding the `web` profile; defaults to dsh's own resolution. */
@@ -145,7 +133,7 @@ export function resolvePnpmScriptPath(
 
 /**
  * Write the `pnpm` shim that makes `spawnSync("pnpm", …)` — which is exactly
- * what `dsh plugin` does, with `shell: true` on Windows — resolve to the
+ * what dsh's plugin manager does, with `shell: true` on Windows — resolve to the
  * bundled pnpm on Electron's Node runtime.
  *
  * The shim is written outside the application directory: a packaged install
@@ -200,43 +188,20 @@ export function createPnpmShim(
   return shimPath;
 }
 
-/** Build the environment handed to the dsh child process. */
-export function buildPluginManagerEnv({
-  pnpmScript,
-  dshCliPath,
-  electronPath,
-  storeDir,
-  shimDir,
-  restartExitCode = DSH_RESTART_EXIT_CODE
-}: {
-  pnpmScript: string;
-  dshCliPath: string;
-  electronPath: string;
-  storeDir: string;
-  shimDir: string;
-  restartExitCode?: number;
-}): Record<string, string> {
-  return {
-    [PLUGIN_MANAGER_ENV_KEYS.pnpmScript]: pnpmScript,
-    [PLUGIN_MANAGER_ENV_KEYS.dshCli]: dshCliPath,
-    [PLUGIN_MANAGER_ENV_KEYS.electron]: electronPath,
-    [PLUGIN_MANAGER_ENV_KEYS.storeDir]: storeDir,
-    [PLUGIN_MANAGER_ENV_KEYS.shimDir]: shimDir,
-    [PLUGIN_MANAGER_ENV_KEYS.restartExitCode]: String(restartExitCode),
-    ...PNPM_CONFIG_ENV
-  };
-}
-
 /**
- * Prepare everything the dsh child needs to run `dsh plugin`: the shim on disk,
- * the store directory inside the dsh home, and the environment block that
- * carries both to the bundled plugin manager (with the shim directory first on
- * `PATH`).
+ * Prepare everything the dsh child needs to run a plugin install: the shim on
+ * disk, the store directory inside the dsh home, and the environment block that
+ * carries both to pnpm (with the shim directory first on `PATH`).
+ *
+ * The store is passed as a setting rather than a command-line flag because the
+ * plugin manager builds its own argument list and this application cannot add
+ * to it: without `npm_config_store_dir`, installs would land in whatever store
+ * pnpm picks for itself, re-unpacking every package the previous store already
+ * held.
  */
 export function preparePluginManagerEnvironment({
   userDataDir,
   electronPath = process.execPath,
-  dshCliPath = resolveDshCliPath(),
   pnpmScript = resolvePnpmScriptPath(),
   dshHome = resolveDshHome(),
   platform = process.platform,
@@ -251,137 +216,20 @@ export function preparePluginManagerEnvironment({
     platform
   });
 
+  const env: Record<string, string> = {
+    ...PNPM_CONFIG_ENV,
+    "npm_config_store_dir": storeDir
+  };
+
   // Windows environment variables are case-insensitive but Node's env object is
   // not, so the existing spelling wins: `Path` and `PATH` as two entries would
   // silently drop one of them.
   const pathKey =
     Object.keys(baseEnv).find((key) => key.toLowerCase() === "path") ?? "PATH";
   const inherited = currentPath ?? baseEnv[pathKey] ?? "";
-  const env = buildPluginManagerEnv({
-    pnpmScript,
-    dshCliPath,
-    electronPath,
-    storeDir,
-    shimDir
-  });
   env[pathKey] = inherited
     ? `${shimDir}${path.delimiter}${inherited}`
     : shimDir;
 
   return { env, pnpmScript, shimPath, storeDir };
-}
-
-/**
- * Arguments for one `dsh plugin` invocation.
- *
- * `--workspace-root` is not optional: a profile is a pnpm workspace root (its
- * generated `pnpm-workspace.yaml` lists `packages: - .`), and pnpm refuses to
- * add a registry package to a workspace root unless it is asked explicitly. dsh
- * passes every argument after the profile through to pnpm verbatim, so the flag
- * has to be built here — without it every install from the registry fails with
- * `ERR_PNPM_ADDING_TO_ROOT`. Local paths and `link:` specs are exempt from that
- * check, so a probe that installs a local plugin does not catch the omission.
- *
- * `--store-dir` is forwarded the same way, which keeps the profile's store
- * inside the dsh home instead of a pnpm installation the user may not have.
- *
- * `specs` arrives already split and validated by the card (one entry per item);
- * every entry becomes one pnpm argument, so a single run can install a plugin
- * together with the `link:` companions its peers need.
- *
- * The bundled `@harness-desktop/dsh-plugin-manager` builds this same command
- * inside the dsh process and is what the settings card actually calls; this is
- * the shell-side spelling of it, kept as the written contract for the argument
- * shape (and exercised by tests) so the two cannot drift apart unnoticed.
- */
-export function buildDshPluginArguments(
-  {
-    action,
-    specs,
-    storeDir
-  }: { action: DshPluginAction; specs?: readonly string[]; storeDir?: string },
-  profileName: string = WEB_PROFILE_NAME
-): string[] {
-  const forwarded: string[] = [action, "--workspace-root", ...(specs ?? [])];
-  if (storeDir !== undefined && storeDir.length > 0) {
-    forwarded.push("--store-dir", storeDir);
-  }
-
-  return ["plugin", "--profile", profileName, ...forwarded];
-}
-
-export interface RunDshPluginOptions {
-  electronPath: string;
-  dshCliPath: string;
-  /** Environment carrying the pnpm shim on `PATH`; see {@link preparePluginManagerEnvironment}. */
-  env: Record<string, string>;
-  /** Kill the command after this long; defaults to five minutes. */
-  timeoutMs?: number;
-  /** Working directory; defaults to the profile's parent expectations (cwd). */
-  cwd?: string;
-}
-
-export interface DshPluginRunResult {
-  code: number | null;
-  /** Everything the command wrote, stdout and stderr interleaved. */
-  output: string;
-  timedOut: boolean;
-}
-
-/**
- * Run one `dsh plugin` command to completion.
- *
- * `windowsHide` is not optional: the desktop process has no console, so without
- * it Windows gives every console-subsystem child a brand-new visible one.
- *
- * Installations go through the bundled plugin manager inside the dsh process, so
- * nothing calls this today; it is the shell-side counterpart of that call, for
- * the day a boot that a bad plugin broke has to be repaired from the error page,
- * where the settings card is out of reach.
- */
-export function runDshPluginCommand(
-  args: readonly string[],
-  {
-    electronPath,
-    dshCliPath,
-    env,
-    timeoutMs = 300_000,
-    cwd
-  }: RunDshPluginOptions
-): Promise<DshPluginRunResult> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(electronPath, [dshCliPath, ...args], {
-      cwd,
-      env: {
-        ...process.env,
-        ...env,
-        ELECTRON_RUN_AS_NODE: "1",
-        NO_COLOR: "1"
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true
-    });
-
-    let output = "";
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill();
-    }, timeoutMs);
-
-    child.stdout?.on("data", (chunk: Buffer) => {
-      output += chunk.toString();
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      output += chunk.toString();
-    });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code, output, timedOut });
-    });
-  });
 }

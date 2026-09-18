@@ -3,12 +3,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { scrubbedParentEnv } from "@deepseek-ai/dsh-subprocess";
 import {
-  DSH_RESTART_EXIT_CODE,
-  PLUGIN_MANAGER_ENV_KEYS,
   PNPM_CONFIG_ENV,
-  buildDshPluginArguments,
-  buildPluginManagerEnv,
   createPnpmShim,
   preparePluginManagerEnvironment,
   resolvePnpmScriptPath
@@ -119,111 +116,12 @@ test("the POSIX shim execs pnpm with the caller's arguments", (t) => {
   );
 });
 
-test("dsh plugin arguments forward pnpm's own flags through the profile", () => {
-  assert.deepEqual(
-    buildDshPluginArguments({
-      action: "add",
-      specs: ["@liustack/modlens@3.26.1"],
-      storeDir: "C:\\Users\\me\\.dsh\\.pnpm-store"
-    }),
-    [
-      "plugin",
-      "--profile",
-      "web",
-      "add",
-      "--workspace-root",
-      "@liustack/modlens@3.26.1",
-      "--store-dir",
-      "C:\\Users\\me\\.dsh\\.pnpm-store"
-    ]
-  );
-
-  assert.deepEqual(buildDshPluginArguments({ action: "remove", specs: ["@liustack/modlens"] }), [
-    "plugin",
-    "--profile",
-    "web",
-    "remove",
-    "--workspace-root",
-    "@liustack/modlens"
-  ]);
-
-  assert.deepEqual(buildDshPluginArguments({ action: "update" }), [
-    "plugin",
-    "--profile",
-    "web",
-    "update",
-    "--workspace-root"
-  ]);
-});
-
-test("several specs in one run become several pnpm arguments", () => {
-  // A registry plugin whose peers cannot be resolved needs a local companion
-  // link in the same run, so one install may carry more than one spec.
-  assert.deepEqual(
-    buildDshPluginArguments({
-      action: "add",
-      specs: [
-        "@hellosz/dsh-pets",
-        "@deepseek-ai/dsh-tools@link:C:/app/node_modules/@deepseek-ai/dsh-tools"
-      ]
-    }),
-    [
-      "plugin",
-      "--profile",
-      "web",
-      "add",
-      "--workspace-root",
-      "@hellosz/dsh-pets",
-      "@deepseek-ai/dsh-tools@link:C:/app/node_modules/@deepseek-ai/dsh-tools"
-    ]
-  );
-});
-
-test("an install targets the profile's workspace root explicitly", () => {
-  // A profile is a pnpm workspace root, and pnpm refuses a registry install
-  // there without `--workspace-root` (ERR_PNPM_ADDING_TO_ROOT). `dsh plugin`
-  // forwards arguments verbatim, so nothing else can add the flag.
-  const args = buildDshPluginArguments({
-    action: "add",
-    specs: ["@hellosz/dsh-pets"]
-  });
-
-  assert.equal(args.filter((argument) => argument === "--workspace-root").length, 1);
-  assert.ok(
-    args.indexOf("--workspace-root") > args.indexOf("add"),
-    "the flag belongs to the pnpm subcommand"
-  );
-});
-
-test("the plugin manager environment carries every path the card needs", () => {
-  const env = buildPluginManagerEnv({
-    pnpmScript: "C:\\app\\pnpm.cjs",
-    dshCliPath: "C:\\app\\dsh\\bin.js",
-    electronPath: "C:\\app\\electron.exe",
-    storeDir: "C:\\Users\\me\\.dsh\\.pnpm-store",
-    shimDir: "C:\\Users\\me\\AppData\\Harness Desktop\\bin"
-  });
-
-  assert.deepEqual(env, {
-    [PLUGIN_MANAGER_ENV_KEYS.pnpmScript]: "C:\\app\\pnpm.cjs",
-    [PLUGIN_MANAGER_ENV_KEYS.dshCli]: "C:\\app\\dsh\\bin.js",
-    [PLUGIN_MANAGER_ENV_KEYS.electron]: "C:\\app\\electron.exe",
-    [PLUGIN_MANAGER_ENV_KEYS.storeDir]: "C:\\Users\\me\\.dsh\\.pnpm-store",
-    [PLUGIN_MANAGER_ENV_KEYS.shimDir]: "C:\\Users\\me\\AppData\\Harness Desktop\\bin",
-    [PLUGIN_MANAGER_ENV_KEYS.restartExitCode]: String(DSH_RESTART_EXIT_CODE),
-    // The literal pnpm reads, not our constant's name: pnpm takes the setting
-    // from this environment entry, which `dsh plugin` passes on by inheritance.
-    "npm_config_auto_install_peers": "false"
-  });
-});
-
 test("preparing the environment disables pnpm's peer auto-install", (t) => {
   const dir = makeTempDir(t);
   const prepared = preparePluginManagerEnvironment({
     userDataDir: path.join(dir, "userData"),
     dshHome: path.join(dir, "dsh-home"),
     pnpmScript: path.join(dir, "pnpm", "bin", "pnpm.cjs"),
-    dshCliPath: path.join(dir, "dsh", "lib", "bin.js"),
     electronPath: "C:\\app\\electron.exe",
     platform: "win32",
     baseEnv: {}
@@ -235,7 +133,64 @@ test("preparing the environment disables pnpm's peer auto-install", (t) => {
   // ERR_PNPM_FETCH_404 (a framework package that names a dependency which was
   // never published) instead of in an installed plugin.
   assert.equal(prepared.env["npm_config_auto_install_peers"], "false");
-  assert.deepEqual(PNPM_CONFIG_ENV, { "npm_config_auto_install_peers": "false" });
+  assert.deepEqual(PNPM_CONFIG_ENV, {
+    "npm_config_auto_install_peers": "false",
+    "npm_config_ignore_workspace_root_check": "true"
+  });
+});
+
+test("preparing the environment turns off pnpm's workspace-root check", (t) => {
+  const dir = makeTempDir(t);
+  const dshHome = path.join(dir, "dsh-home");
+  const prepared = preparePluginManagerEnvironment({
+    userDataDir: path.join(dir, "userData"),
+    dshHome,
+    pnpmScript: path.join(dir, "pnpm", "bin", "pnpm.cjs"),
+    electronPath: "C:\\app\\electron.exe",
+    platform: "win32",
+    baseEnv: {}
+  });
+
+  // The official plugin manager runs `pnpm add <spec>` with no --workspace-root
+  // flag, and a profile is a pnpm workspace root: without this setting every
+  // registry install fails with ERR_PNPM_ADDING_TO_ROOT. The switch travels as
+  // the environment entry pnpm reads, because the manager's argument list is
+  // built upstream and this application cannot add to it.
+  assert.equal(prepared.env["npm_config_ignore_workspace_root_check"], "true");
+  // The manager passes no --store-dir either, so the store the previous
+  // implementations used is preserved the same way.
+  assert.equal(prepared.env["npm_config_store_dir"], path.join(dshHome, ".pnpm-store"));
+});
+
+/**
+ * The settings above only reach pnpm if they survive the environment the plugin
+ * manager starts it with — `scrubbedParentEnv()`, not the dsh child's own
+ * environment. `npm_config_*` is where pnpm reads a setting from, and `DSH_*` is
+ * what that filter drops, which is why the profile's `.npmrc` has to carry the
+ * same settings for a profile this application does not prepare.
+ */
+test("the pnpm settings survive the environment a service install runs under", (t) => {
+  const keys = ["npm_config_ignore_workspace_root_check", "npm_config_store_dir", "DSH_HOME"];
+  const saved = keys.map((key) => [key, process.env[key]] as const);
+  t.after(() => {
+    for (const [key, value] of saved) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  });
+
+  process.env["npm_config_ignore_workspace_root_check"] = "true";
+  process.env["npm_config_store_dir"] = "C:\\probe\\.pnpm-store";
+  process.env["DSH_HOME"] = "C:\\probe\\dsh-home";
+
+  const scrubbed = scrubbedParentEnv();
+
+  assert.equal(scrubbed["npm_config_ignore_workspace_root_check"], "true");
+  assert.equal(scrubbed["npm_config_store_dir"], "C:\\probe\\.pnpm-store");
+  assert.equal(scrubbed["DSH_HOME"], undefined);
 });
 
 test("preparing the environment puts the shim first on PATH without losing its spelling", (t) => {
@@ -248,7 +203,6 @@ test("preparing the environment puts the shim first on PATH without losing its s
     userDataDir,
     dshHome,
     pnpmScript: path.join(dir, "pnpm", "bin", "pnpm.cjs"),
-    dshCliPath: path.join(dir, "dsh", "lib", "bin.js"),
     electronPath: "C:\\app\\electron.exe",
     platform: "win32",
     baseEnv
@@ -272,7 +226,6 @@ test("preparing the environment works without an inherited PATH", (t) => {
     userDataDir: path.join(dir, "userData"),
     dshHome: path.join(dir, "dsh-home"),
     pnpmScript: path.join(dir, "pnpm", "bin", "pnpm.cjs"),
-    dshCliPath: path.join(dir, "dsh", "lib", "bin.js"),
     electronPath: "/opt/harness/electron",
     platform: "linux",
     baseEnv: {}

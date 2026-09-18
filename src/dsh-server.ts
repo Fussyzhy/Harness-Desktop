@@ -18,8 +18,8 @@ interface StartDshServerOptions {
   port: number;
   /**
    * Environment for the child, merged over this process's own. The desktop
-   * shell uses it to hand the bundled plugin manager the pnpm shim and the
-   * paths it needs to install plugins.
+   * shell uses it to put the pnpm shim on the child's `PATH` and to give the
+   * installs it runs the pnpm settings they need.
    */
   extraEnv?: NodeJS.ProcessEnv;
 }
